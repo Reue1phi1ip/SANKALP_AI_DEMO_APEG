@@ -1,0 +1,491 @@
+{
+  "agents_data": [
+    {
+      "advanced_parameters": {
+        "max_tokens": 1986,
+        "temperature": 0.3,
+        "top_p": 0.9
+      },
+      "description": "ROLE\nPull raw rows from WaveflowDB (applications, promotions, demographics, socio_econ) and save as artifacts. Do not transform.\n\nINPUT\n{\n  \"params\": { \"schemes\": [], \"timeframe\": \"\", \"geo_level\": \"\", \"segments\": [] },\n  \"waveflowdb\": { \"database\": \"\", \"base_url\": \"\", \"api_key\": \"\" },\n  \"artifacts\": {}, \"errors\": []\n}\n\nTOOLS\n- waveflowdb_fetch(params)\n- rows_to_artifact(payload, name)\n\nQUERY RULES\n- applications: filter by scheme_id ∈ params.schemes (if provided), geo_level = params.geo_level (if provided). Date window from timeframe if present; otherwise send empty query {}.\n- promotions/demographics/socio_econ: include geo_level if present; scheme_id if provided.\n\nSTEPS\nFor each collection in [applications, promotions, demographics, socio_econ]:\n  1) Build a query JSON as above.\n  2) Call waveflowdb_fetch({ base_url, api_key, database, collection:<name>, query, limit:100000 }).\n  3) Call rows_to_artifact(result, name:\"<name>_raw\").\n  4) If ok → set artifacts.raw.<name> = table_id; else → push \"missing:<name>\" to errors.\n\nOUTPUT\n{\n  \"artifacts\": { \"raw\": {\n    \"applications\": \"table:applications_raw\",\n    \"promotions\": \"table:promotions_raw\",\n    \"demographics\": \"table:demographics_raw\",\n    \"socio_econ\": \"table:socio_econ_raw\"\n  }},\n  \"errors\": [...]\n}",
+      "id": "1283426c-4eb9-4519-b977-33c242710b92",
+      "model": {
+        "api_key": "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",
+        "base_url": "https://api.openai.com/v1/",
+        "client": "openai",
+        "date": "26th December, 2024",
+        "description": "Open AI API key",
+        "id": "bab17426-341f-4256-87da-bf94bc3e4ae4",
+        "model_name": "gpt-4o"
+      },
+      "name": "Data Access Agent",
+      "role": "Data Access Agent",
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [],
+      "type": "agent",
+      "user_id": "suvendu.kumar@apeg.in",
+      "web_assist": false
+    },
+    {
+      "advanced_parameters": {
+        "max_tokens": 1000,
+        "temperature": 0.3,
+        "top_p": 0.9
+      },
+      "description": "ROLE\nYou validate and normalize datasets for Scheme Forecasting (M1). You DO NOT invent missing values except to set counts = 0 when truly absent.\n\nGOAL\nCheck required columns, fix datatypes, drop invalid rows, and produce cleaned versions of all datasets.\n\nREQUIRED DATASETS\n- applications: date, scheme_id, geo_code, apps_count\n- promotions: date, scheme_id, geo_code, promo_intensity\n- demographics: geo_code, population, age_*, gender_*, income_*\n- socio_econ: geo_code, metric, value\n\nTOOLS\n1) load_table(path_or_id)\n2) dq_unify(dfs: dict) -> { \"cleaned\": dict, \"dq_report\": dict }\n3) save_artifact(df, name)\n\nOUTPUT\n- artifacts.cleaned.* table IDs\n- dq_report JSON of checks and changes\n- errors[] for missing datasets\n",
+      "id": "eb59261e-68be-4c95-a571-926333ac2217",
+      "model": {
+        "api_key": "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",
+        "base_url": "https://api.openai.com/v1/",
+        "client": "openai",
+        "date": "26th December, 2024",
+        "description": "Open AI API key",
+        "id": "bab17426-341f-4256-87da-bf94bc3e4ae4",
+        "model_name": "gpt-4o"
+      },
+      "name": "Data Quality Agent",
+      "role": "Data Quality & Harmonization",
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [],
+      "type": "agent",
+      "user_id": "suvendu.kumar@apeg.in",
+      "web_assist": false
+    },
+    {
+      "advanced_parameters": {
+        "max_tokens": 1000,
+        "temperature": 0.3,
+        "top_p": 0.9
+      },
+      "description": "ROLE\nYou generate minimal time-series features from cleaned datasets for Scheme Forecasting (M1).\n\nTASKS\n- Add calendar features (month, quarter, year)\n- Create lag features from existing history only\n- Join promotions/demographics/socio-economic data by geo_code and scheme_id\n- Festival/harvest flags remain 0 until connected to real data\n- No backfilling; missing joins = 0\n\nTOOLS\n1) load_artifact(table_id)\n2) fe_timeseries(app_df, promo_df, demo_df, socio_df) -> { \"features\": DataFrame, \"cols\": list }\n3) save_artifact(df, name)\n\nOUTPUT\n- artifacts.features table ID\n- feature_list array",
+      "id": "40f095ba-1136-4f90-bfe4-552b9d0e4573",
+      "model": {
+        "api_key": "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",
+        "base_url": "https://api.openai.com/v1/",
+        "client": "openai",
+        "date": "26th December, 2024",
+        "description": "Open AI API key",
+        "id": "bab17426-341f-4256-87da-bf94bc3e4ae4",
+        "model_name": "gpt-4o"
+      },
+      "name": "Feature Engineering Agent",
+      "role": "Feature Engineering",
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [],
+      "type": "agent",
+      "user_id": "suvendu.kumar@apeg.in",
+      "web_assist": false
+    },
+    {
+      "advanced_parameters": {
+        "max_tokens": 1000,
+        "temperature": 0.3,
+        "top_p": 0.9
+      },
+      "description": "ROLE\nYou decide which forecasting model each series should use, without fitting it.\n\nLOGIC\n- If monthly history >= 24 pts or quarterly >= 8 pts → ARIMA or Prophet (choose deterministically)\n- Else → ZeroForecast\n\nTOOLS\n1) profile_series(features_table_id, params)\n2) make_model_plan(profile: list)\n\nOUTPUT\n- model_plan[] for Forecasting Agent",
+      "id": "5e4473c9-a6cc-42f4-ae88-66914bbf1020",
+      "model": {
+        "api_key": "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",
+        "base_url": "https://api.openai.com/v1/",
+        "client": "openai",
+        "date": "26th December, 2024",
+        "description": "Open AI API key",
+        "id": "bab17426-341f-4256-87da-bf94bc3e4ae4",
+        "model_name": "gpt-4o"
+      },
+      "name": "Model Planning Agent",
+      "role": "Model Selection",
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [],
+      "type": "agent",
+      "user_id": "suvendu.kumar@apeg.in",
+      "web_assist": false
+    },
+    {
+      "advanced_parameters": {
+        "max_tokens": 1000,
+        "temperature": 0.3,
+        "top_p": 0.9
+      },
+      "description": "ROLE\nTrain and produce forecasts per model_plan, horizon derived from params.timeframe.\n\nTIMEFRAME MAPPING\n- next_quarter = 1 period\n- next_6_months = 2 periods\n- next_year = 4 periods\n\nTOOLS\n- fit_arima(series_spec, horizon)\n- fit_prophet(series_spec, horizon)\n- zero_forecast(series_spec, horizon)\n- save_artifact(df, name)\n\nRULES\n- If insufficient data or error → return 0s for all metrics\n- Output table: series_id, period, yhat, yhat_low, yhat_high",
+      "id": "40eba559-7015-49a8-b744-80e52567cd95",
+      "model": {
+        "api_key": "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",
+        "base_url": "https://api.openai.com/v1/",
+        "client": "openai",
+        "date": "26th December, 2024",
+        "description": "Open AI API key",
+        "id": "bab17426-341f-4256-87da-bf94bc3e4ae4",
+        "model_name": "gpt-4o"
+      },
+      "name": "Forecasting Agent",
+      "role": "Forecasting Execution",
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [],
+      "type": "agent",
+      "user_id": "suvendu.kumar@apeg.in",
+      "web_assist": false
+    },
+    {
+      "code": "def sheets_fetch_stage(\r\n    sheet_id,\r\n    tabs,\r\n    sheets_creds_json,\r\n    header_row=\"1\",\r\n    limit=\"250000\",\r\n    *args,\r\n    **kwargs\r\n):\r\n    \"\"\"\r\n    Reads one or more tabs from a Google Sheet and stages them as artifacts.\r\n\r\n    Params (strings):\r\n      sheet_id           : Google Sheet ID (from URL)\r\n      tabs               : comma-separated worksheet names, e.g. \"applications,promotions,demographics,socio_econ\"\r\n      sheets_creds_json  : FULL Service Account JSON as a string (or a dict)\r\n      header_row         : header row index (default \"1\")\r\n      limit              : max rows per tab (default \"250000\")\r\n    \"\"\"\r\n    import json\r\n    import pandas as pd\r\n\r\n    # ------------------------------\r\n    # 1) Import Google deps\r\n    # ------------------------------\r\n    try:\r\n        import gspread\r\n        from google.oauth2.service_account import Credentials\r\n        import gspread.utils as U\r\n    except Exception as e:\r\n        return {\"ok\": False, \"error\": f\"Missing gspread/google-auth deps: {e}\"}\r\n\r\n    # ------------------------------\r\n    # 2) Normalize numeric params\r\n    # ------------------------------\r\n    try:\r\n        hdr = int(header_row)\r\n    except Exception:\r\n        hdr = 1\r\n    try:\r\n        lim = int(limit)\r\n    except Exception:\r\n        lim = 250000\r\n\r\n    # ------------------------------\r\n    # 3) Fallbacks for creds & sheet\r\n    #    Prefer request values, else env, else optional hard-coded\r\n    # ------------------------------\r\n    import os\r\n\r\n    FALLBACK_SA_JSON = os.getenv(\"SHEETS_SA_JSON\", \"\").strip()\r\n    FALLBACK_SHEET_ID = os.getenv(\"FALLBACK_SHEET_ID\", \"\").strip()\r\n\r\n    # OPTIONAL DEV-ONLY hard-codes (leave blank for prod; or set as env vars above)\r\n    if not FALLBACK_SA_JSON:\r\n        FALLBACK_SA_JSON = \"\"  # e.g. '{\"type\":\"service_account\",...}'\r\n    if not FALLBACK_SHEET_ID:\r\n        FALLBACK_SHEET_ID = \"\"  # e.g. \"1ezS_aex0jacESJiNVLnuUzwh-Y_3QpN2d70lbOp_DsI\"\r\n\r\n    # Prefer call-provided values; fallback to env/hardcoded\r\n    sid = (sheet_id or \"\").strip() or FALLBACK_SHEET_ID\r\n    raw_creds = sheets_creds_json or FALLBACK_SA_JSON\r\n\r\n    # Parse creds: accept dict OR string; fix newline escapes\r\n    sa_info = None\r\n    if isinstance(raw_creds, dict):\r\n        sa_info = raw_creds\r\n    elif isinstance(raw_creds, str) and raw_creds.strip():\r\n        txt = raw_creds.strip()\r\n        # handle accidental double-encoding or surrounding quotes\r\n        try:\r\n            sa_info = json.loads(txt)\r\n        except Exception:\r\n            # Sometimes the JSON arrives quoted twice; try one more time\r\n            try:\r\n                sa_info = json.loads(json.loads(txt))\r\n            except Exception as inner:\r\n                return {\"ok\": False, \"error\": f\"Invalid service account JSON (cannot parse): {inner}\"}\r\n    else:\r\n        sa_info = None\r\n\r\n    if not sid:\r\n        return {\"ok\": False, \"error\": \"Missing sheet_id (not in payload or env fallback)\"}\r\n    if not sa_info:\r\n        return {\"ok\": False, \"error\": \"Missing service account JSON (not in payload or env fallback)\"}\r\n\r\n    # Fix private_key newlines if needed\r\n    try:\r\n        if \"private_key\" in sa_info and \"\\\\n\" in sa_info[\"private_key\"]:\r\n            sa_info[\"private_key\"] = sa_info[\"private_key\"].replace(\"\\\\n\", \"\\n\")\r\n    except Exception:\r\n        pass\r\n\r\n    # ------------------------------\r\n    # 4) Authorize & open sheet\r\n    # ------------------------------\r\n    try:\r\n        scopes = [\"https://www.googleapis.com/auth/spreadsheets.readonly\"]\r\n        creds = Credentials.from_service_account_info(sa_info, scopes=scopes)\r\n        gc = gspread.authorize(creds)\r\n        sh = gc.open_by_key(sid)\r\n    except Exception as e:\r\n        return {\"ok\": False, \"error\": f\"Google Sheets auth/open error: {e}\"}\r\n\r\n    # ------------------------------\r\n    # 5) Read helper (supports custom header row)\r\n    # ------------------------------\r\n    def read_records(ws, header_row_idx):\r\n        if header_row_idx == 1:\r\n            # get_all_records() respects the first row as headers\r\n            return ws.get_all_records()\r\n        # Build a range from header_row_idx to sheet extents\r\n        last_row = ws.row_count or 5000\r\n        last_col = ws.col_count or 50\r\n        rng = U.rowcol_to_a1(header_row_idx, 1) + \":\" + U.rowcol_to_a1(last_row, last_col)\r\n        values = ws.get(rng) or []\r\n        if not values:\r\n            return []\r\n        headers = [str(h).strip() for h in (values[0] if values else [])]\r\n        return [dict(zip(headers, row)) for row in values[1:] if any(str(x).strip() for x in row)]\r\n\r\n    # ------------------------------\r\n    # 6) Iterate requested tabs\r\n    # ------------------------------\r\n    warnings = []\r\n    out_ids = {\r\n        \"applications_id\": None,\r\n        \"promotions_id\": None,\r\n        \"demographics_id\": None,\r\n        \"socio_econ_id\": None,\r\n    }\r\n\r\n    tab_list = [t.strip() for t in (tabs or \"\").split(\",\") if t.strip()]\r\n    if not tab_list:\r\n        return {\"ok\": False, \"error\": \"No tabs requested (tabs was empty)\"}\r\n\r\n    for tab in tab_list:\r\n        try:\r\n            ws = sh.worksheet(tab)\r\n            records = read_records(ws, hdr)[:lim]\r\n        except Exception as e:\r\n            warnings.append(f\"Tab '{tab}' not found or read error: {e}\")\r\n            records = []\r\n\r\n        # Normalize keys to snake_case-lite\r\n        normed = []\r\n        for r in records:\r\n            nr = {}\r\n            for k, v in r.items():\r\n                key = str(k).strip().lower().replace(\" \", \"_\")\r\n                nr[key] = v\r\n            normed.append(nr)\r\n\r\n        df = pd.DataFrame(normed or [])\r\n\r\n        # Stage as artifact\r\n        try:\r\n            from waveflow.artifacts import save_artifact\r\n            table_id = save_artifact(df, f\"{tab}_raw\")\r\n        except Exception:\r\n            table_id = f\"table:{tab}_raw\"  # fallback symbolic id\r\n\r\n        lk = tab.lower()\r\n        if lk == \"applications\":\r\n            out_ids[\"applications_id\"] = table_id\r\n        elif lk == \"promotions\":\r\n            out_ids[\"promotions_id\"] = table_id\r\n        elif lk == \"demographics\":\r\n            out_ids[\"demographics_id\"] = table_id\r\n        elif lk in (\"socio_econ\", \"socioecon\", \"socioeconomic\"):\r\n            out_ids[\"socio_econ_id\"] = table_id\r\n\r\n    for k in list(out_ids.keys()):\r\n        out_ids.setdefault(k, None)\r\n\r\n    res = {\"ok\": True, **out_ids}\r\n    if warnings:\r\n        res[\"warnings\"] = warnings\r\n    return res\r\n",
+      "description": "Executes userdenfined tools and provides tha output",
+      "id": "5c1c6ce3-110b-4528-b7be-60c4f11123a6",
+      "name": "SheetsFetchStage",
+      "parameters": {
+        "header_row": "1",
+        "limit": "250000",
+        "sheet_id": "1ezS_aex0jacESJiNVLnuUzwh-Y_3QpN2d70lbOp_DsI",
+        "sheets_creds_json": {
+          "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+          "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+          "client_email": "apeg-448@sankalp-ai-demo.iam.gserviceaccount.com",
+          "client_id": "115277975030828348249",
+          "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/apeg-448%40sankalp-ai-demo.iam.gserviceaccount.com",
+          "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC2zan1qC4QfmQP\nvvGPDFsjvSdXMM0pBGARhYxyEFLhaGZcbWdGs5XhUhpPsCfVgsdOWw36UN6Pp4W2\n...snip...\n-----END PRIVATE KEY-----\n",
+          "private_key_id": "22794dadf22cf4f725aea23882226506ab641cca",
+          "project_id": "sankalp-ai-demo",
+          "token_uri": "https://oauth2.googleapis.com/token",
+          "type": "service_account",
+          "universe_domain": "googleapis.com"
+        },
+        "tabs": "applications,promotions,demographics,socio_econ"
+      },
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [
+        {
+          "created_at": "Thu, 14 Aug 2025 06:25:24 GMT",
+          "description": "Fetch data from Google sheets",
+          "display_name": "GoogleSheetsFetch",
+          "function": {
+            "function": {
+              "description": "Fetch data from Google sheets",
+              "name": "sheets_fetch_stage",
+              "parameters": {
+                "properties": {
+                  "header_row": {
+                    "description": "Parameter header_row",
+                    "type": "string"
+                  },
+                  "limit": {
+                    "description": "Parameter limit",
+                    "type": "string"
+                  },
+                  "sheet_id": {
+                    "description": "Parameter sheet_id",
+                    "type": "string"
+                  },
+                  "sheets_creds_json": {
+                    "description": "Parameter sheets_creds_json",
+                    "type": "string"
+                  },
+                  "tabs": {
+                    "description": "Parameter tabs",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "id": "5334b1b6-d616-4263-86d0-247d4a77217e",
+            "type": "function",
+            "user_id": "suvendu.kumar@apeg.in"
+          },
+          "id": "cd132ab1-2fd7-43b8-9f51-d1fd54964f4e",
+          "type": "function",
+          "user_id": "suvendu.kumar@apeg.in"
+        }
+      ],
+      "type": "executor node",
+      "user_id": "suvendu.kumar@apeg.in"
+    },
+    {
+      "description": "Cal simplifies meeting coordination by providing shareable booking pages, calendar syncing, and availability management to streamline the scheduling process",
+      "id": "bdd5eb89-d8e8-42c5-9b72-c321d2079356",
+      "name": "Cal",
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tool_details": {
+        "appId": "7c5c62a8-ab72-40ec-b822-5229ef76b96b",
+        "categories": [
+          "scheduling & booking"
+        ],
+        "displayName": "Cal",
+        "enabled": true,
+        "key": "cal",
+        "logo": "https://cdn.jsdelivr.net/gh/ComposioHQ/open-logos@master//cal-logo.png",
+        "meta": {
+          "actionsCount": 142,
+          "is_custom_app": false,
+          "triggersCount": 0
+        },
+        "name": "cal",
+        "no_auth": false,
+        "tags": [
+          "scheduling & booking"
+        ]
+      },
+      "tool_key": "cal",
+      "type": "tool",
+      "user_id": "suvendu.kumar@apeg.in"
+    },
+    {
+      "code": "def dq_unify(applications_id=None, promotions_id=None, demographics_id=None, socio_econ_id=None, *args, **kwargs):\r\n    \"\"\"\r\n    inputs: table ids as strings\r\n    returns: {\"cleaned\": {...}, \"dq_report\": {...}}\r\n    \"\"\"\r\n    import pandas as pd\r\n    def _load(tid):\r\n        try:\r\n            from waveflow.artifacts import load_artifact\r\n            return load_artifact(tid) if tid else pd.DataFrame()\r\n        except Exception:\r\n            return pd.DataFrame()\r\n\r\n    apps  = _load(applications_id)\r\n    promos= _load(promotions_id)\r\n    demo  = _load(demographics_id)\r\n    socio = _load(socio_econ_id)\r\n\r\n    if not apps.empty:\r\n        for c in [\"date\",\"scheme_id\",\"geo_code\"]:\r\n            if c not in apps.columns: apps[c] = None\r\n        apps[\"apps_count\"] = pd.to_numeric(apps.get(\"apps_count\", 0), errors=\"coerce\").fillna(0).astype(float)\r\n    if not promos.empty:\r\n        for c in [\"date\",\"scheme_id\",\"geo_code\"]:\r\n            if c not in promos.columns: promos[c] = None\r\n        promos[\"promo_intensity\"] = pd.to_numeric(promos.get(\"promo_intensity\", 0), errors=\"coerce\").fillna(0).astype(float)\r\n\r\n    try:\r\n        from waveflow.artifacts import save_artifact\r\n        cleaned = {\r\n            \"applications\": save_artifact(apps, \"applications_clean\"),\r\n            \"promotions\":   save_artifact(promos, \"promotions_clean\"),\r\n            \"demographics\": save_artifact(demo, \"demographics_clean\"),\r\n            \"socio_econ\":   save_artifact(socio, \"socio_econ_clean\")\r\n        }\r\n    except Exception:\r\n        cleaned = {\r\n            \"applications\": \"table:applications_clean\",\r\n            \"promotions\":   \"table:promotions_clean\",\r\n            \"demographics\": \"table:demographics_clean\",\r\n            \"socio_econ\":   \"table:socio_econ_clean\"\r\n        }\r\n\r\n    report = {\r\n        \"rows\": {\r\n            \"applications\": int(len(apps.index)),\r\n            \"promotions\":   int(len(promos.index)),\r\n            \"demographics\": int(len(demo.index)),\r\n            \"socio_econ\":   int(len(socio.index))\r\n        }\r\n    }\r\n    return {\"cleaned\": cleaned, \"dq_report\": report}\r\n",
+      "description": "Executes userdenfined tools and provides tha output",
+      "id": "739b1fb7-2263-4cba-a1ef-f151f64352c6",
+      "name": "CleanFE",
+      "parameters": {
+        "applications_id": "{{ SheetsFetchStage.applications_id || null }}",
+        "demographics_id": "{{ SheetsFetchStage.demographics_id  || null }}",
+        "promotions_id": "{{ SheetsFetchStage.promotions_id   || null }}",
+        "socio_econ_id": "{{ SheetsFetchStage.socio_econ_id    || null }}"
+      },
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [
+        {
+          "created_at": "Fri, 08 Aug 2025 11:34:48 GMT",
+          "description": "Minimal normalization (no invention), then create time features and lag for Scheme Forecasting",
+          "display_name": "Data_Quality_FE",
+          "function": {
+            "function": {
+              "description": "Minimal normalization (no invention), then create time features and lag for Scheme Forecasting",
+              "name": "dq_unify",
+              "parameters": {
+                "properties": {
+                  "applications_id": {
+                    "description": "Parameter applications_id",
+                    "type": "string"
+                  },
+                  "demographics_id": {
+                    "description": "Parameter demographics_id",
+                    "type": "string"
+                  },
+                  "promotions_id": {
+                    "description": "Parameter promotions_id",
+                    "type": "string"
+                  },
+                  "socio_econ_id": {
+                    "description": "Parameter socio_econ_id",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "id": "79c992ae-b452-41d5-b589-f928eb191fe4",
+            "type": "function",
+            "user_id": "suvendu.kumar@apeg.in"
+          },
+          "id": "fc03ef18-e31a-40f0-84f2-2222741b1cbb",
+          "type": "function",
+          "user_id": "suvendu.kumar@apeg.in"
+        }
+      ],
+      "type": "executor node",
+      "user_id": "suvendu.kumar@apeg.in"
+    },
+    {
+      "code": "def profile_series(features_id, *args, **kwargs):\r\n    \"\"\"\r\n    returns: [{\"series_id\":\"S1|STATE:AP\", \"history_points\": N}, ...]\r\n    \"\"\"\r\n    import pandas as pd\r\n    try:\r\n        from waveflow.artifacts import load_artifact\r\n        feats = load_artifact(features_id)\r\n    except Exception:\r\n        feats = pd.DataFrame()\r\n    if feats is None or feats.empty or not set([\"scheme_id\",\"geo_code\",\"date\"]).issubset(feats.columns):\r\n        return []\r\n    feats = feats.dropna(subset=[\"scheme_id\",\"geo_code\"])\r\n    out = []\r\n    for (sid, geo), g in feats.groupby([\"scheme_id\",\"geo_code\"]):\r\n        out.append({\"series_id\": f\"{sid}|{geo}\", \"history_points\": int(g.shape[0])})\r\n    return out",
+      "description": "Executes userdenfined tools and provides tha output",
+      "id": "fc703ed1-9052-42d0-a1bf-fc91a2c466bd",
+      "name": "Policy Executor_2",
+      "parameters": {
+        "features_id": "{{ CleanFE.features }}",
+        "timeframe": "{{ $.input.params.timeframe }}"
+      },
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [
+        {
+          "created_at": "Fri, 08 Aug 2025 11:36:20 GMT",
+          "description": "Profile each series, select model by history length (Prophet/ARIMA/Zero), and create horizon forecasts from timeframe. No training artifacts saved—simple baseline.",
+          "display_name": "Model_Planning_Forecasting",
+          "function": {
+            "function": {
+              "description": "Profile each series, select model by history length (Prophet/ARIMA/Zero), and create horizon forecasts from timeframe. No training artifacts saved—simple baseline.",
+              "name": "profile_series",
+              "parameters": {
+                "properties": {
+                  "features_id": {
+                    "description": "Parameter features_id",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "id": "2dc7f3f6-f311-42df-afb2-584f6d7410c1",
+            "type": "function",
+            "user_id": "suvendu.kumar@apeg.in"
+          },
+          "id": "573e1ede-1831-4235-bddd-349748435d13",
+          "type": "function",
+          "user_id": "suvendu.kumar@apeg.in"
+        }
+      ],
+      "type": "executor node",
+      "user_id": "suvendu.kumar@apeg.in"
+    },
+    {
+      "code": "def profile_series(features_id, *args, **kwargs):\r\n    \"\"\"\r\n    returns: [{\"series_id\":\"S1|STATE:AP\", \"history_points\": N}, ...]\r\n    \"\"\"\r\n    import pandas as pd\r\n    try:\r\n        from waveflow.artifacts import load_artifact\r\n        feats = load_artifact(features_id)\r\n    except Exception:\r\n        feats = pd.DataFrame()\r\n    if feats is None or feats.empty or not set([\"scheme_id\",\"geo_code\",\"date\"]).issubset(feats.columns):\r\n        return []\r\n    feats = feats.dropna(subset=[\"scheme_id\",\"geo_code\"])\r\n    out = []\r\n    for (sid, geo), g in feats.groupby([\"scheme_id\",\"geo_code\"]):\r\n        out.append({\"series_id\": f\"{sid}|{geo}\", \"history_points\": int(g.shape[0])})\r\n    return out",
+      "description": "Executes userdenfined tools and provides tha output",
+      "id": "607b9a3b-66c9-4973-bc36-812c8020aaaf",
+      "name": "PlanForecast",
+      "parameters": {
+        "features_id": "{{ CleanFE.features || null }}",
+        "timeframe": "{{ ($.input && $.input.params && $.input.params.timeframe) ? $.input.params.timeframe : 'next_quarter' }}"
+      },
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [
+        {
+          "created_at": "Fri, 08 Aug 2025 11:36:20 GMT",
+          "description": "Profile each series, select model by history length (Prophet/ARIMA/Zero), and create horizon forecasts from timeframe. No training artifacts saved—simple baseline.",
+          "display_name": "Model_Planning_Forecasting",
+          "function": {
+            "function": {
+              "description": "Profile each series, select model by history length (Prophet/ARIMA/Zero), and create horizon forecasts from timeframe. No training artifacts saved—simple baseline.",
+              "name": "profile_series",
+              "parameters": {
+                "properties": {
+                  "features_id": {
+                    "description": "Parameter features_id",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "id": "2dc7f3f6-f311-42df-afb2-584f6d7410c1",
+            "type": "function",
+            "user_id": "suvendu.kumar@apeg.in"
+          },
+          "id": "573e1ede-1831-4235-bddd-349748435d13",
+          "type": "function",
+          "user_id": "suvendu.kumar@apeg.in"
+        }
+      ],
+      "type": "executor node",
+      "user_id": "suvendu.kumar@apeg.in"
+    },
+    {
+      "code": "def load_artifact(table_id: str):\r\n    # return DataFrame-like object; stub returns empty structure\r\n    import pandas as pd\r\n    return pd.DataFrame(columns=[\"series_id\",\"period\",\"yhat\",\"yhat_low\",\"yhat_high\",\"geo_code\",\"scheme_id\"])\r\n\r\ndef aggregate_forecasts(forecasts_id: str, params: dict) -> dict:\r\n    import pandas as pd\r\n    df = load_artifact(forecasts_id)\r\n    if df.empty:\r\n        agg = pd.DataFrame(columns=[\"region\",\"period\",\"expected\",\"low\",\"high\"])\r\n        cards = {\"total_forecast\": 0, \"confidence_range\": [0,0], \"series_count\": 0}\r\n        return {\"agg_table\": agg, \"cards\": cards}\r\n\r\n    # Minimal zero-safe rollup example (replace with real logic later)\r\n    df[\"expected\"] = df.get(\"yhat\", 0)\r\n    df[\"low\"] = df.get(\"yhat_low\", 0)\r\n    df[\"high\"] = df.get(\"yhat_high\", 0)\r\n\r\n    # Map geo_code → region (stub: pass-through)\r\n    df[\"region\"] = df.get(\"geo_code\", \"—\")\r\n\r\n    grp = df.groupby([\"region\",\"period\"], as_index=False)[[\"expected\",\"low\",\"high\"]].sum()\r\n    total = float(grp[\"expected\"].sum()) if not grp.empty else 0.0\r\n    lo = float(grp[\"low\"].sum()) if not grp.empty else 0.0\r\n    hi = float(grp[\"high\"].sum()) if not grp.empty else 0.0\r\n    cards = {\"total_forecast\": total, \"confidence_range\": [lo, hi], \"series_count\": int(df[\"series_id\"].nunique() if \"series_id\" in df else 0)}\r\n    return {\"agg_table\": grp, \"cards\": cards}\r\n\r\ndef save_artifact(df, name: str) -> str:\r\n    # persist and return a table-id (stub)\r\n    return f\"table:{name}\"",
+      "description": "Executes userdenfined tools and provides tha output",
+      "id": "74ffdf52-c8e0-4125-bae8-63658ad61810",
+      "name": "AggDrivers",
+      "parameters": {
+        "features_id": "{{ CleanFE.features }}",
+        "forecasts_raw_id": "{{ PlanForecast.forecasts_raw }}"
+      },
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [
+        {
+          "created_at": "Fri, 08 Aug 2025 11:38:47 GMT",
+          "description": " Aggregate forecasts to region/period and compute summary cards; create descriptive (non-causal) driver notes from available fields.",
+          "display_name": "Aggregator_drivers",
+          "function": {
+            "function": {
+              "description": " Aggregate forecasts to region/period and compute summary cards; create descriptive (non-causal) driver notes from available fields.",
+              "name": "load_artifact",
+              "parameters": {
+                "properties": {
+                  "table_id": {
+                    "description": "Parameter table_id",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "id": "28a854c2-6029-4b3b-a922-dfa4f589c4ae",
+            "type": "function",
+            "user_id": "suvendu.kumar@apeg.in"
+          },
+          "id": "1da2f692-f06e-4ea7-9a2a-3179d3dd8531",
+          "type": "function",
+          "user_id": "suvendu.kumar@apeg.in"
+        }
+      ],
+      "type": "executor node",
+      "user_id": "suvendu.kumar@apeg.in"
+    },
+    {
+      "code": "def build_ui_payload(agg_id: str, cards: dict, driver_notes: list, dq_report: dict, errors: list) -> dict:\r\n    import pandas as pd\r\n    agg = load_artifact(agg_id)\r\n    if getattr(agg, \"empty\", True):\r\n        chart_series = [{\"period\":\"—\",\"low\":0,\"expected\":0,\"high\":0}]\r\n        table_rows = [{\"region\":\"—\",\"period\":\"—\",\"expected\":0,\"low\":0,\"high\":0}]\r\n    else:\r\n        # Expect columns: region, period, expected, low, high\r\n        chart_series = []\r\n        table_rows = []\r\n        for _, r in agg.iterrows():\r\n            chart_series.append({\"period\": str(r.get(\"period\",\"—\")), \"low\": float(r.get(\"low\",0)), \"expected\": float(r.get(\"expected\",0)), \"high\": float(r.get(\"high\",0))})\r\n            table_rows.append({\"region\": str(r.get(\"region\",\"—\")), \"period\": str(r.get(\"period\",\"—\")), \"expected\": float(r.get(\"expected\",0)), \"low\": float(r.get(\"low\",0)), \"high\": float(r.get(\"high\",0))})\r\n\r\n    payload = {\r\n        \"summary_cards\": {\r\n            \"total_forecast\": float(cards.get(\"total_forecast\", 0)),\r\n            \"confidence_range\": [\r\n                float(cards.get(\"confidence_range\",[0,0])[0]),\r\n                float(cards.get(\"confidence_range\",[0,0])[1])\r\n            ],\r\n            \"series_count\": int(cards.get(\"series_count\", 0)),\r\n            \"warnings\": errors if errors else []\r\n        },\r\n        \"chart\": { \"type\": \"line_with_band\", \"series\": chart_series },\r\n        \"table\": table_rows,\r\n        \"drivers\": driver_notes or [],\r\n        \"debug\": { \"dq_report\": dq_report or {}, \"errors\": errors or [] }\r\n    }\r\n    return payload\r\n\r\ndef save_json(obj: dict, name: str) -> str:\r\n    # persist and return a json-id (stub)\r\n    return f\"json:{name}\"",
+      "description": "Executes userdenfined tools and provides tha output",
+      "id": "d9e337b9-83af-4451-a3fd-38bfe29cddb6",
+      "name": "UIPackager",
+      "parameters": {
+        "cards": "{{ JSON.stringify(AggDrivers.cards || { total_forecast: 0, confidence_range: [0,0], series_count: 0 }) }}",
+        "dq_report": "{{ JSON.stringify(CleanFE.dq_report || {}) }}",
+        "drivers": "{{ JSON.stringify(AggDrivers.drivers || []) }}",
+        "errors": "{{ JSON.stringify(SheetsFetchStage.warnings || []) }}",
+        "forecasts_agg_id": "{{ AggDrivers.forecasts_agg }}",
+        "model_plan": "{{ JSON.stringify(PlanForecast.model_plan || []) }}",
+        "params": "{{ JSON.stringify(($.input && $.input.params) ? $.input.params : {}) }}",
+        "persist": "true"
+      },
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "tools": [
+        {
+          "created_at": "Fri, 08 Aug 2025 11:40:17 GMT",
+          "description": "Produce the UI JSON used by WeWeb (cards, chart, table, drivers). Optionally persist run metadata. Returns response_json",
+          "display_name": "UI Packager_persist agent",
+          "function": {
+            "function": {
+              "description": "Produce the UI JSON used by WeWeb (cards, chart, table, drivers). Optionally persist run metadata. Returns response_json",
+              "name": "build_ui_payload",
+              "parameters": {
+                "properties": {
+                  "agg_id": {
+                    "description": "Parameter agg_id",
+                    "type": "string"
+                  },
+                  "cards": {
+                    "description": "Parameter cards",
+                    "type": "string"
+                  },
+                  "dq_report": {
+                    "description": "Parameter dq_report",
+                    "type": "string"
+                  },
+                  "driver_notes": {
+                    "description": "Parameter driver_notes",
+                    "type": "string"
+                  },
+                  "errors": {
+                    "description": "Parameter errors",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "id": "7d85ede1-8226-47af-8995-8531c73b3a61",
+            "type": "function",
+            "user_id": "suvendu.kumar@apeg.in"
+          },
+          "id": "0f70f17d-644b-4d67-8f2b-1af18b2b2828",
+          "type": "function",
+          "user_id": "suvendu.kumar@apeg.in"
+        }
+      ],
+      "type": "executor node",
+      "user_id": "suvendu.kumar@apeg.in"
+    }
+  ],
+  "sequence": [
+    {
+      "date": "14 Aug, 2025",
+      "sequence": [
+        "5c1c6ce3-110b-4528-b7be-60c4f11123a6",
+        "739b1fb7-2263-4cba-a1ef-f151f64352c6",
+        "607b9a3b-66c9-4973-bc36-812c8020aaaf",
+        "74ffdf52-c8e0-4125-bae8-63658ad61810",
+        "d9e337b9-83af-4451-a3fd-38bfe29cddb6",
+        "1283426c-4eb9-4519-b977-33c242710b92"
+      ],
+      "session_id": "7adc7bf3-3f76-4cb8-887a-6bda83e169b5",
+      "status": "development",
+      "time": "07:03:36.226541",
+      "user_id": "suvendu.kumar@apeg.in",
+      "workflow_desc": "Scheme Forecasting Workflow",
+      "workflow_name": "SchemeForecasting_demo",
+      "workflow_type": null
+    }
+  ]
+}

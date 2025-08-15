@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+pandas
+gspread
+google-auth
+requests
+waveflow-studio      # module imports as `waveflow_studio`
