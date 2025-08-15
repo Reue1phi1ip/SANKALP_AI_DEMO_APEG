@@ -1,9 +1,9 @@
-fastapi
-uvicorn[standard]
-pydantic
-pandas
-gspread
-google-auth
-requests
-python-multipart
+fastapi>=0.112
+uvicorn[standard]>=0.29
+pydantic>=2.7           # FastAPI v2-compatible
+pandas>=2.2.3           # good wheels for Python 3.13
+gspread>=6.0
+google-auth>=2.29
+requests>=2.31
+python-multipart>=0.0.9 # only needed if you add file/form endpoints; safe to keep
 # waveflow-studio      # module imports as `waveflow_studio`
