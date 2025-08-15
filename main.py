@@ -1,50 +1,46 @@
+# main.py
 import os
 import sys
 import json
 import importlib
 import pathlib
+import uuid
+from types import ModuleType
 from typing import Any, Dict, Optional, Tuple, Callable
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ----------------------------
-# Environment / Config
+# Env / Config
 # ----------------------------
 STUDIO_SECRET = os.getenv("STUDIO_SECRET", "")
-
-# Comma-separated list, e.g.:
-# "https://editor.weweb.io,https://*.weweb.app,https://*.weweb-preview.io"
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-# Optional regex that matches preview/prod/editor (use one or the other)
 ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX", "")
 
 # ----------------------------
-# FastAPI App & CORS
+# Minimal in-memory artifact store (shim)
+# Must be registered in sys.modules BEFORE importing Tools.*
 # ----------------------------
-app = FastAPI(title="SANKALP Backend", version="1.0.0")
+_ART_STORE: Dict[str, Any] = {}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,                    # explicit list (can be empty)
-    allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,  # optional single regex
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def _save_artifact(obj: Any, name: str) -> str:
+    key = f"mem:{name}:{uuid.uuid4().hex}"
+    _ART_STORE[key] = obj
+    return key
 
-# ----------------------------
-# Request model for /run
-# ----------------------------
-class RunPayload(BaseModel):
-    google: Optional[Dict[str, Any]] = None
-    input: Optional[Dict[str, Any]] = None
-    workflow_id: Optional[str] = None
+def _load_artifact(key: str) -> Any:
+    return _ART_STORE.get(key)
 
-    class Config:
-        extra = "allow"
-
+# Register shim as `waveflow.artifacts`
+if "waveflow.artifacts" not in sys.modules:
+    artifacts_mod = ModuleType("artifacts")
+    artifacts_mod.save_artifact = _save_artifact
+    artifacts_mod.load_artifact = _load_artifact
+    pkg_mod = ModuleType("waveflow")
+    sys.modules["waveflow"] = pkg_mod
+    sys.modules["waveflow.artifacts"] = artifacts_mod
 
 # ----------------------------
 # Make Tools importable (case-sensitive on Linux)
@@ -52,15 +48,10 @@ class RunPayload(BaseModel):
 BASE_DIR = pathlib.Path(__file__).parent.resolve()
 TOOLS_DIR = BASE_DIR / "Tools"
 if TOOLS_DIR.exists():
-    # allow "from Tools.X import func" and "from X import func"
     sys.path.insert(0, str(TOOLS_DIR))
     sys.path.insert(0, str(BASE_DIR))
 
-def _import_first(candidates: Tuple[Tuple[str, str], ...]) -> Callable:
-    """
-    Try a list of (module_name, attr_name) pairs and return the first found callable.
-    Raise a helpful ImportError if none match.
-    """
+def _import_first(candidates: Tuple[Tuple[str, str], ...]):
     errors = []
     for mod_name, attr in candidates:
         try:
@@ -70,12 +61,10 @@ def _import_first(candidates: Tuple[Tuple[str, str], ...]) -> Callable:
             return fn
         except Exception as e:
             errors.append(f"{mod_name}.{attr}: {e}")
-            continue
     raise ImportError("Unable to import any of:\n  - " + "\n  - ".join(errors))
 
-
 # ----------------------------
-# Orchestration tools (robust module-name variants)
+# Import orchestration tools
 # ----------------------------
 sheets_fetch_stage = _import_first((
     ("Tools.GoogleSheetsFetch", "sheets_fetch_stage"),
@@ -83,25 +72,21 @@ sheets_fetch_stage = _import_first((
     ("GoogleSheetsFetch", "sheets_fetch_stage"),
     ("GooglesheetsFetch", "sheets_fetch_stage"),
 ))
-
 dq_and_fe = _import_first((
     ("Tools.Data_quality_featureEngineer", "dq_and_fe"),
     ("Tools.data_quality_fe", "dq_and_fe"),
     ("data_quality_fe", "dq_and_fe"),
 ))
-
 plan_and_forecast = _import_first((
     ("Tools.Model_planning_forecasting", "plan_and_forecast"),
     ("Tools.model_planning", "plan_and_forecast"),
     ("model_planning", "plan_and_forecast"),
 ))
-
 aggregate_and_drivers = _import_first((
     ("Tools.Aggregator_Drivers", "aggregate_and_drivers"),
     ("Tools.aggregator", "aggregate_and_drivers"),
     ("aggregator", "aggregate_and_drivers"),
 ))
-
 ui_pack_and_persist = _import_first((
     ("Tools.UI_Packager_persist", "ui_pack_and_persist"),
     ("Tools.UIPackager_persist", "ui_pack_and_persist"),
@@ -109,12 +94,34 @@ ui_pack_and_persist = _import_first((
     ("UIPackager_persist", "ui_pack_and_persist"),
 ))
 
+# ----------------------------
+# FastAPI & CORS
+# ----------------------------
+app = FastAPI(title="SANKALP Backend", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ----------------------------
+# Models
+# ----------------------------
+class RunPayload(BaseModel):
+    google: Optional[Dict[str, Any]] = None
+    input: Optional[Dict[str, Any]] = None
+    workflow_id: Optional[str] = None
+    class Config:
+        extra = "allow"
 
 # ----------------------------
 # Startup log
 # ----------------------------
 @app.on_event("startup")
-async def on_startup():
+async def _startup():
     print("== Registered routes ==")
     for r in app.routes:
         path = getattr(r, "path", "")
@@ -122,9 +129,8 @@ async def on_startup():
         print(f"{r.name:20s} {path:25s} [{methods}]")
     print(f"Tools dir exists: {TOOLS_DIR.exists()} at {TOOLS_DIR}")
 
-
 # ----------------------------
-# Health & simple echo (debug)
+# Health
 # ----------------------------
 @app.get("/")
 async def root():
@@ -133,23 +139,6 @@ async def root():
 @app.get("/health")
 async def health():
     return {"ok": True, "status": "healthy"}
-
-@app.post("/echo")
-async def echo(request: Request):
-    raw = await request.body()
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-        keys = list(parsed.keys()) if isinstance(parsed, dict) else None
-    except Exception:
-        parsed = None
-        keys = None
-    return {
-        "len": len(raw),
-        "content_type": request.headers.get("content-type"),
-        "top_keys": keys,
-        "raw_preview": raw[:400].decode("utf-8", errors="replace"),
-    }
-
 
 # ----------------------------
 # Orchestrated run endpoint
@@ -160,22 +149,20 @@ async def run_endpoint(
     request: Request,
     x_studio_secret: Optional[str] = Header(None),
 ):
-    # --- Auth check ---
+    # Auth
     if not STUDIO_SECRET:
         raise HTTPException(status_code=500, detail="Server misconfigured: STUDIO_SECRET missing")
     if x_studio_secret != STUDIO_SECRET:
         raise HTTPException(status_code=401, detail="Invalid or missing x-studio-secret")
 
-    # --- Inspect raw (helps when Content-Type is wrong) ---
+    # Inspect raw body (helpful for WeWeb payloads)
     raw = await request.body()
     print("DEBUG raw_body_bytes:", len(raw))
     print("DEBUG headers.sample:", {k: v for k, v in list(request.headers.items())[:6]})
 
-    # --- Model parse (pydantic) ---
+    # Normal parse + fallback manual parse
     g = payload.google or {}
     inp = payload.input or {}
-
-    # --- Fallback: if model fields are empty, parse raw JSON manually ---
     if not g and not inp and raw:
         try:
             fb = json.loads(raw.decode("utf-8"))
@@ -188,37 +175,39 @@ async def run_endpoint(
 
     params = (inp.get("params") or {}) if isinstance(inp.get("params"), dict) else inp
 
-    # ---- STEP 1: Google Sheets -> staged artifacts (and/or in-memory data)
-    sheet_id   = (g.get("sheet_id") or "").strip() or None
-    tabs       = g.get("tabs") or "applications,promotions,demographics,socio_econ"
+    # ---- STEP 1: Google Sheets -> staged artifacts (env fallbacks) ----
+    sheet_id   = (g.get("sheet_id") or os.getenv("SHEET_ID") or "").strip() or None
+    tabs       = g.get("tabs") or os.getenv("SHEET_TABS") or "applications,promotions,demographics,socio_econ"
 
-    # Normalize creds: accept dict OR string; always pass trimmed JSON string downstream
-    raw_creds = g.get("sheets_creds_json") or g.get("service_account_json") or ""
+    raw_creds = (
+        g.get("sheets_creds_json")
+        or g.get("service_account_json")
+        or os.getenv("GSHEETS_SA_JSON")
+        or ""
+    )
     if isinstance(raw_creds, dict):
         credsjson = json.dumps(raw_creds)
-    elif isinstance(raw_creds, str):
-        credsjson = raw_creds.strip()
     else:
-        credsjson = ""
+        credsjson = (raw_creds or "").strip()
 
-    header_row = str(g.get("header_row", "1"))
-    limit      = str(g.get("limit", "250000"))
+    header_row = str(g.get("header_row", os.getenv("SHEET_HEADER_ROW", "1")))
+    limit      = str(g.get("limit", os.getenv("SHEET_LIMIT", "250000")))
 
     print("DEBUG sheets_creds_json_len:", len(credsjson))
     print("DEBUG sheet_id:", sheet_id, "| tabs:", tabs, "| header_row:", header_row, "| limit:", limit)
 
-    errors: list = []
+    errors: list[str] = []
+
     try:
         sheets_res = sheets_fetch_stage(
             sheet_id=sheet_id,
             tabs=tabs,
-            sheets_creds_json=credsjson,  # normalized string
+            sheets_creds_json=credsjson,
             header_row=header_row,
             limit=limit,
-        )
-        if not sheets_res or not sheets_res.get("ok", True):
-            err_msg = sheets_res.get("error") if isinstance(sheets_res, dict) else "unknown"
-            errors.append(f"sheets_fetch_stage error: {err_msg}")
+        ) or {}
+        if not sheets_res.get("ok", True):
+            errors.append(f"sheets_fetch_stage error: {sheets_res.get('error')}")
     except Exception as e:
         sheets_res = {}
         errors.append(f"sheets_fetch_stage exception: {e}")
@@ -230,43 +219,42 @@ async def run_endpoint(
             promotions_id=sheets_res.get("promotions_id"),
             demographics_id=sheets_res.get("demographics_id"),
             socio_econ_id=sheets_res.get("socio_econ_id"),
-        )
+        ) or {}
     except Exception as e:
-        dq_res = {"features": None, "dq_report": {}, "features_data": []}
+        dq_res = {"features": None, "dq_report": {}}
         errors.append(f"dq_and_fe exception: {e}")
 
-    features_id   = (dq_res or {}).get("features")
-    features_data = (dq_res or {}).get("features_data")  # requires the tiny addition in your DQ tool
+    features_id = dq_res.get("features")
+    print("DEBUG features_id:", features_id)
 
-    # ---- STEP 3: Planning + Forecasts (with in-memory fallback)
+    # ---- STEP 3: Planning + Forecasts ----
     timeframe = str((params.get("timeframe") or "next_quarter")).lower()
     try:
-        pf_res = plan_and_forecast(features_id=features_id, timeframe=timeframe, features_data=features_data)
+        pf_res = plan_and_forecast(features_id=features_id, timeframe=timeframe) or {}
     except Exception as e:
-        pf_res = {"forecasts_raw": None, "model_plan": [], "forecasts_raw_data": []}
+        pf_res = {"forecasts_raw": None, "model_plan": []}
         errors.append(f"plan_and_forecast exception: {e}")
 
-    forecasts_raw_id   = (pf_res or {}).get("forecasts_raw")
-    forecasts_raw_data = (pf_res or {}).get("forecasts_raw_data")
+    forecasts_raw_id = pf_res.get("forecasts_raw")
+    print("DEBUG forecasts_raw_id:", forecasts_raw_id)
 
-    # ---- STEP 4: Aggregate + Drivers (with in-memory fallback)
+    # ---- STEP 4: Aggregate + Drivers ----
     try:
         ag_res = aggregate_and_drivers(
             forecasts_raw_id=forecasts_raw_id,
-            features_id=features_id,
-            forecasts_raw_data=forecasts_raw_data,
-            features_data=features_data,
-        )
+            features_id=features_id
+        ) or {}
     except Exception as e:
         ag_res = {
             "forecasts_agg": None,
             "cards": {"total_forecast": 0, "confidence_range": [0, 0], "series_count": 0},
-            "drivers": ["Drivers unavailable"],
-            "forecasts_agg_data": [],
+            "drivers": [],
         }
         errors.append(f"aggregate_and_drivers exception: {e}")
 
-    # ---- STEP 5: UI Packager (use agg-data fallback if artifacts are empty)
+    print("DEBUG cards:", ag_res.get("cards"))
+
+    # ---- STEP 5: UI Packager ----
     try:
         ui_res = ui_pack_and_persist(
             forecasts_agg_id=ag_res.get("forecasts_agg"),
@@ -277,9 +265,8 @@ async def run_endpoint(
             persist="true",
             params=params,
             model_plan=(pf_res or {}).get("model_plan"),
-            forecasts_agg_data=ag_res.get("forecasts_agg_data"),  # <-- pass in-memory fallback
-        )
-        payload_for_ui = (ui_res or {}).get("response_json", {})
+        ) or {}
+        payload_for_ui = ui_res.get("response_json", {})
     except Exception as e:
         payload_for_ui = {
             "summary_cards": {
@@ -288,16 +275,40 @@ async def run_endpoint(
                 "series_count": 0,
                 "warnings": errors + [f"ui_pack_and_persist exception: {e}"],
             },
-            "chart": {"type": "line_with_band", "series": [{"period": "—", "low": 0, "expected": 0, "high": 0}]},
-            "table": [{"region": "—", "period": "—", "expected": 0, "low": 0, "high": 0}],
-            "drivers": ["Drivers unavailable"],
-            "debug": {"errors": errors, "dq_report": (dq_res or {}).get("dq_report", {})},
+            "chart": {"type": "line_with_band", "series": []},
+            "table": [],
+            "drivers": [],
+            "debug": {"errors": errors},
         }
 
     return payload_for_ui
 
+# ----------------------------
+# (Optional) SDK endpoints if you need them later
+# ----------------------------
+@app.post("/wfs/workflow")
+async def upload_workflow(
+    x_studio_secret: Optional[str] = Header(None),
+    file: UploadFile = File(...),
+):
+    if x_studio_secret != STUDIO_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid or missing x-studio-secret")
+    return {"ok": True, "msg": "workflow upload endpoint stub (not used in this flow)"}
 
-# Optional: enable local run
+@app.post("/wfs/chat")
+async def chat_workflow(
+    x_studio_secret: Optional[str] = Header(None),
+    workflow_id: str = Form(...),
+    query: str = Form(...),
+    context: str = Form(""),
+):
+    if x_studio_secret != STUDIO_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid or missing x-studio-secret")
+    return {"answer": f"(stub) You asked: {query}", "conversation": []}
+
+# ----------------------------
+# Local run
+# ----------------------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8080"))
