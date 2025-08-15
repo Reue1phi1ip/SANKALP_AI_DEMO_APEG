@@ -111,4 +111,10 @@ def dq_and_fe(applications_id=None, promotions_id=None, demographics_id=None, so
     except Exception:
         features_id = "table:features_m1"
 
-    return {"cleaned": cleaned, "features": features_id, "dq_report": dq_report}
+    return {
+  "cleaned": cleaned,
+  "features": features_id,
+  "dq_report": dq_report,
+  "features_data": feats.to_dict(orient="records")  # <— add
+}
+

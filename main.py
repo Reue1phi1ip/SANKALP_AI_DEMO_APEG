@@ -1,14 +1,11 @@
-# main.py
 import os
 import sys
 import json
 import importlib
 import pathlib
-import tempfile
 from typing import Any, Dict, Optional, Tuple, Callable
 
-import requests
-from fastapi import FastAPI, Header, HTTPException, Request, UploadFile, File, Body
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -17,25 +14,21 @@ from pydantic import BaseModel
 # ----------------------------
 STUDIO_SECRET = os.getenv("STUDIO_SECRET", "")
 
+# Comma-separated list, e.g.:
+# "https://editor.weweb.io,https://*.weweb.app,https://*.weweb-preview.io"
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# Optional regex that matches preview/prod/editor (use one or the other)
 ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX", "")
-
-WFS_API_KEY = os.getenv("WFS_API_KEY", "")
-WFS_BASE_URL = (os.getenv("WFS_BASE_URL") or "http://3.92.146.100:8000").rstrip("/")
-
-# Optional defaults for /run when payload.google is missing
-DEFAULT_SHEET_ID = os.getenv("SHEET_ID", "").strip() or None
-DEFAULT_GSHEETS_JSON = os.getenv("GSHEETS_SA_JSON", "").strip()
 
 # ----------------------------
 # FastAPI App & CORS
 # ----------------------------
-app = FastAPI(title="SANKALP Backend", version="1.1.0")
+app = FastAPI(title="SANKALP Backend", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,                    # explicit list (can be empty)
-    allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,  # optional regex
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,  # optional single regex
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -52,16 +45,22 @@ class RunPayload(BaseModel):
     class Config:
         extra = "allow"
 
+
 # ----------------------------
 # Make Tools importable (case-sensitive on Linux)
 # ----------------------------
 BASE_DIR = pathlib.Path(__file__).parent.resolve()
 TOOLS_DIR = BASE_DIR / "Tools"
 if TOOLS_DIR.exists():
+    # allow "from Tools.X import func" and "from X import func"
     sys.path.insert(0, str(TOOLS_DIR))
     sys.path.insert(0, str(BASE_DIR))
 
 def _import_first(candidates: Tuple[Tuple[str, str], ...]) -> Callable:
+    """
+    Try a list of (module_name, attr_name) pairs and return the first found callable.
+    Raise a helpful ImportError if none match.
+    """
     errors = []
     for mod_name, attr in candidates:
         try:
@@ -71,7 +70,9 @@ def _import_first(candidates: Tuple[Tuple[str, str], ...]) -> Callable:
             return fn
         except Exception as e:
             errors.append(f"{mod_name}.{attr}: {e}")
+            continue
     raise ImportError("Unable to import any of:\n  - " + "\n  - ".join(errors))
+
 
 # ----------------------------
 # Orchestration tools (robust module-name variants)
@@ -82,21 +83,25 @@ sheets_fetch_stage = _import_first((
     ("GoogleSheetsFetch", "sheets_fetch_stage"),
     ("GooglesheetsFetch", "sheets_fetch_stage"),
 ))
+
 dq_and_fe = _import_first((
     ("Tools.Data_quality_featureEngineer", "dq_and_fe"),
     ("Tools.data_quality_fe", "dq_and_fe"),
     ("data_quality_fe", "dq_and_fe"),
 ))
+
 plan_and_forecast = _import_first((
     ("Tools.Model_planning_forecasting", "plan_and_forecast"),
     ("Tools.model_planning", "plan_and_forecast"),
     ("model_planning", "plan_and_forecast"),
 ))
+
 aggregate_and_drivers = _import_first((
     ("Tools.Aggregator_Drivers", "aggregate_and_drivers"),
     ("Tools.aggregator", "aggregate_and_drivers"),
     ("aggregator", "aggregate_and_drivers"),
 ))
+
 ui_pack_and_persist = _import_first((
     ("Tools.UI_Packager_persist", "ui_pack_and_persist"),
     ("Tools.UIPackager_persist", "ui_pack_and_persist"),
@@ -104,25 +109,9 @@ ui_pack_and_persist = _import_first((
     ("UIPackager_persist", "ui_pack_and_persist"),
 ))
 
-# ----------------------------
-# Optional SDK import (vendored or installed)
-# ----------------------------
-def _get_wfs_client_or_none():
-    """
-    Tries to import a vendored/installed SDK: `from waveflow_studio import WaveFlowStudio`.
-    Returns an instance or None; HTTP fallback will be used if None.
-    """
-    try:
-        sdk = importlib.import_module("waveflow_studio")
-        WaveFlowStudio = getattr(sdk, "WaveFlowStudio")
-        client = WaveFlowStudio(api_key=WFS_API_KEY, base_url=WFS_BASE_URL)
-        return client
-    except Exception as e:
-        print("[wfs-sdk] not available, falling back to raw HTTP:", e)
-        return None
 
 # ----------------------------
-# Health & Debug
+# Startup log
 # ----------------------------
 @app.on_event("startup")
 async def on_startup():
@@ -133,6 +122,10 @@ async def on_startup():
         print(f"{r.name:20s} {path:25s} [{methods}]")
     print(f"Tools dir exists: {TOOLS_DIR.exists()} at {TOOLS_DIR}")
 
+
+# ----------------------------
+# Health & simple echo (debug)
+# ----------------------------
 @app.get("/")
 async def root():
     return {"ok": True, "service": "SANKALP backend", "docs": "/docs"}
@@ -157,122 +150,10 @@ async def echo(request: Request):
         "raw_preview": raw[:400].decode("utf-8", errors="replace"),
     }
 
-# ============================================================
-# ================  ENDPOINT A: Create Workflow  =============
-# ============================================================
-@app.post("/wfs/workflow")
-async def wfs_create_workflow(
-    file: Optional[UploadFile] = File(None),
-    workflow_json: Optional[Dict[str, Any]] = Body(None),
-):
-    """
-    Create a workflow in WaveFlow Studio.
 
-    - Option 1: multipart/form-data with `file` (JSON file).
-    - Option 2: raw JSON body: { "workflow_json": { ... } }
-    """
-    if not WFS_API_KEY:
-        raise HTTPException(500, "WFS_API_KEY missing on server")
-
-    client = _get_wfs_client_or_none()
-
-    # If SDK present and we have file content, use it; otherwise HTTP fallback
-    if file is not None:
-        content = await file.read()
-        if client:
-            # SDK expects a file path; write to tmp then call
-            with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as tf:
-                tf.write(content)
-                tmp_path = tf.name
-            try:
-                resp = client.create_workflow(tmp_path)
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-            return resp
-        else:
-            # HTTP fallback
-            url = f"{WFS_BASE_URL}/workflow-config"
-            headers = {"Authorization": f"Bearer {WFS_API_KEY}"}
-            files = {"file": (file.filename or "workflow.json", content, "application/json")}
-            r = requests.post(url, headers=headers, files=files)
-            try:
-                return r.json()
-            except Exception:
-                return {"status": r.status_code, "text": r.text}
-
-    # No file -> maybe direct JSON body
-    if workflow_json is not None:
-        payload_bytes = json.dumps(workflow_json).encode("utf-8")
-        if client:
-            with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as tf:
-                tf.write(payload_bytes)
-                tmp_path = tf.name
-            try:
-                resp = client.create_workflow(tmp_path)
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-            return resp
-        else:
-            url = f"{WFS_BASE_URL}/workflow-config"
-            headers = {"Authorization": f"Bearer {WFS_API_KEY}"}
-            files = {"file": ("workflow.json", payload_bytes, "application/json")}
-            r = requests.post(url, headers=headers, files=files)
-            try:
-                return r.json()
-            except Exception:
-                return {"status": r.status_code, "text": r.text}
-
-    raise HTTPException(400, "Provide either multipart `file` or JSON body `workflow_json`.")
-
-# ============================================================
-# ================  ENDPOINT B: Chat with Workflow ===========
-# ============================================================
-class ChatBody(BaseModel):
-    workflow_id: str
-    query: str
-    context: Optional[str] = ""
-
-@app.post("/wfs/chat")
-async def wfs_chat(body: ChatBody):
-    """
-    Chat with a workflow previously created in WaveFlow Studio.
-    Uses SDK if present; otherwise raw HTTP.
-    """
-    if not WFS_API_KEY:
-        raise HTTPException(500, "WFS_API_KEY missing on server")
-
-    client = _get_wfs_client_or_none()
-    if client:
-        # The SDK's chat() uses its stored workflow_id; set it once per call.
-        client.workflow_id = body.workflow_id
-        try:
-            return client.chat(query=body.query, context=body.context or "")
-        except Exception as e:
-            return {"error": str(e)}
-
-    # HTTP fallback
-    url = f"{WFS_BASE_URL}/chat-workflow"
-    headers = {"Authorization": f"Bearer {WFS_API_KEY}"}
-    data = {
-        "workflow_id": body.workflow_id,
-        "query": body.query,
-        "context": body.context or "",
-    }
-    r = requests.post(url, headers=headers, data=data)
-    try:
-        return r.json()
-    except Exception:
-        return {"status": r.status_code, "text": r.text}
-
-# ============================================================
-# ================  Original /run Orchestration  =============
-# ============================================================
+# ----------------------------
+# Orchestrated run endpoint
+# ----------------------------
 @app.post("/run")
 async def run_endpoint(
     payload: RunPayload,
@@ -290,10 +171,11 @@ async def run_endpoint(
     print("DEBUG raw_body_bytes:", len(raw))
     print("DEBUG headers.sample:", {k: v for k, v in list(request.headers.items())[:6]})
 
-    # --- Normal (model) parse + fallback ---
+    # --- Model parse (pydantic) ---
     g = payload.google or {}
     inp = payload.input or {}
 
+    # --- Fallback: if model fields are empty, parse raw JSON manually ---
     if not g and not inp and raw:
         try:
             fb = json.loads(raw.decode("utf-8"))
@@ -306,12 +188,12 @@ async def run_endpoint(
 
     params = (inp.get("params") or {}) if isinstance(inp.get("params"), dict) else inp
 
-    # ---- STEP 1: Google Sheets -> staged artifacts ----
-    sheet_id   = (g.get("sheet_id") or "").strip() or DEFAULT_SHEET_ID
+    # ---- STEP 1: Google Sheets -> staged artifacts (and/or in-memory data)
+    sheet_id   = (g.get("sheet_id") or "").strip() or None
     tabs       = g.get("tabs") or "applications,promotions,demographics,socio_econ"
 
-    # Normalize creds: accept dict OR string; pass a trimmed JSON string
-    raw_creds = g.get("sheets_creds_json") or g.get("service_account_json") or DEFAULT_GSHEETS_JSON or ""
+    # Normalize creds: accept dict OR string; always pass trimmed JSON string downstream
+    raw_creds = g.get("sheets_creds_json") or g.get("service_account_json") or ""
     if isinstance(raw_creds, dict):
         credsjson = json.dumps(raw_creds)
     elif isinstance(raw_creds, str):
@@ -325,15 +207,12 @@ async def run_endpoint(
     print("DEBUG sheets_creds_json_len:", len(credsjson))
     print("DEBUG sheet_id:", sheet_id, "| tabs:", tabs, "| header_row:", header_row, "| limit:", limit)
 
-    errors: list[str] = []
-
-    # If you still see sheet_id None here, the client never sent it AND
-    # you have no SHEET_ID in env. We'll proceed and return warnings.
+    errors: list = []
     try:
         sheets_res = sheets_fetch_stage(
             sheet_id=sheet_id,
             tabs=tabs,
-            sheets_creds_json=credsjson,
+            sheets_creds_json=credsjson,  # normalized string
             header_row=header_row,
             limit=limit,
         )
@@ -353,33 +232,41 @@ async def run_endpoint(
             socio_econ_id=sheets_res.get("socio_econ_id"),
         )
     except Exception as e:
-        dq_res = {"features": None, "dq_report": {}}
+        dq_res = {"features": None, "dq_report": {}, "features_data": []}
         errors.append(f"dq_and_fe exception: {e}")
 
-    features_id = (dq_res or {}).get("features")
+    features_id   = (dq_res or {}).get("features")
+    features_data = (dq_res or {}).get("features_data")  # requires the tiny addition in your DQ tool
 
-    # ---- STEP 3: Planning + Forecasts ----
+    # ---- STEP 3: Planning + Forecasts (with in-memory fallback)
     timeframe = str((params.get("timeframe") or "next_quarter")).lower()
     try:
-        pf_res = plan_and_forecast(features_id=features_id, timeframe=timeframe)
+        pf_res = plan_and_forecast(features_id=features_id, timeframe=timeframe, features_data=features_data)
     except Exception as e:
-        pf_res = {"forecasts_raw": None, "model_plan": []}
+        pf_res = {"forecasts_raw": None, "model_plan": [], "forecasts_raw_data": []}
         errors.append(f"plan_and_forecast exception: {e}")
 
-    forecasts_raw_id = (pf_res or {}).get("forecasts_raw")
+    forecasts_raw_id   = (pf_res or {}).get("forecasts_raw")
+    forecasts_raw_data = (pf_res or {}).get("forecasts_raw_data")
 
-    # ---- STEP 4: Aggregate + Drivers ----
+    # ---- STEP 4: Aggregate + Drivers (with in-memory fallback)
     try:
-        ag_res = aggregate_and_drivers(forecasts_raw_id=forecasts_raw_id, features_id=features_id)
+        ag_res = aggregate_and_drivers(
+            forecasts_raw_id=forecasts_raw_id,
+            features_id=features_id,
+            forecasts_raw_data=forecasts_raw_data,
+            features_data=features_data,
+        )
     except Exception as e:
         ag_res = {
             "forecasts_agg": None,
             "cards": {"total_forecast": 0, "confidence_range": [0, 0], "series_count": 0},
-            "drivers": [],
+            "drivers": ["Drivers unavailable"],
+            "forecasts_agg_data": [],
         }
         errors.append(f"aggregate_and_drivers exception: {e}")
 
-    # ---- STEP 5: UI Packager ----
+    # ---- STEP 5: UI Packager (use agg-data fallback if artifacts are empty)
     try:
         ui_res = ui_pack_and_persist(
             forecasts_agg_id=ag_res.get("forecasts_agg"),
@@ -390,6 +277,7 @@ async def run_endpoint(
             persist="true",
             params=params,
             model_plan=(pf_res or {}).get("model_plan"),
+            forecasts_agg_data=ag_res.get("forecasts_agg_data"),  # <-- pass in-memory fallback
         )
         payload_for_ui = (ui_res or {}).get("response_json", {})
     except Exception as e:
@@ -402,28 +290,14 @@ async def run_endpoint(
             },
             "chart": {"type": "line_with_band", "series": [{"period": "—", "low": 0, "expected": 0, "high": 0}]},
             "table": [{"region": "—", "period": "—", "expected": 0, "low": 0, "high": 0}],
-            "drivers": [],
-            "debug": {"errors": errors},
+            "drivers": ["Drivers unavailable"],
+            "debug": {"errors": errors, "dq_report": (dq_res or {}).get("dq_report", {})},
         }
-
-    # Surface warnings if sheet_id/creds were missing
-    if not sheet_id:
-        payload_for_ui.setdefault("summary_cards", {}).setdefault("warnings", [])
-        payload_for_ui["summary_cards"]["warnings"].append(
-            "sheets_fetch_stage error: Missing sheet_id (not in payload or env fallback)"
-        )
-    if not credsjson:
-        payload_for_ui.setdefault("summary_cards", {}).setdefault("warnings", [])
-        payload_for_ui["summary_cards"]["warnings"].append(
-            "sheets_fetch_stage warning: Missing sheets_creds_json (not in payload or env fallback)"
-        )
 
     return payload_for_ui
 
 
-# ----------------------------
-# Local dev entry
-# ----------------------------
+# Optional: enable local run
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8080"))
