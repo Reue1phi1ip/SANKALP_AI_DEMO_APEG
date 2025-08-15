@@ -5,4 +5,5 @@ pandas
 gspread
 google-auth
 requests
+python-multipart
 # waveflow-studio      # module imports as `waveflow_studio`
