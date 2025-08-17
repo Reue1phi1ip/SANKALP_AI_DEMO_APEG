@@ -6,7 +6,7 @@ import importlib
 import pathlib
 import uuid
 from types import ModuleType
-from typing import Any, Dict, Optional, Tuple, Callable
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,7 +100,7 @@ ui_pack_and_persist = _import_first((
 app = FastAPI(title="SANKALP Backend", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=ALLOWED_ORIGINS or ["*"],
     allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,
     allow_credentials=True,
     allow_methods=["*"],
@@ -225,60 +225,77 @@ async def run_endpoint(
         errors.append(f"dq_and_fe exception: {e}")
 
     features_id = dq_res.get("features")
+    features_data = dq_res.get("features_data")
     print("DEBUG features_id:", features_id)
 
     # ---- STEP 3: Planning + Forecasts ----
     timeframe = str((params.get("timeframe") or "next_quarter")).lower()
     try:
-        pf_res = plan_and_forecast(features_id=features_id, timeframe=timeframe) or {}
+        pf_res = plan_and_forecast(
+            features_id=features_id,
+            timeframe=timeframe,
+            features_data=features_data
+        ) or {}
     except Exception as e:
-        pf_res = {"forecasts_raw": None, "model_plan": []}
+        pf_res = {"forecasts_raw": None, "model_plan": [], "forecasts_raw_data": []}
         errors.append(f"plan_and_forecast exception: {e}")
 
     forecasts_raw_id = pf_res.get("forecasts_raw")
+    forecasts_raw_data = pf_res.get("forecasts_raw_data")
     print("DEBUG forecasts_raw_id:", forecasts_raw_id)
 
-    # ---- STEP 4: Aggregate + Drivers ----
+    # ---- STEP 4: Aggregate + Drivers (+ Analytics) ----
     try:
         ag_res = aggregate_and_drivers(
             forecasts_raw_id=forecasts_raw_id,
-            features_id=features_id
+            features_id=features_id,
+            forecasts_raw_data=forecasts_raw_data,
+            features_data=features_data
         ) or {}
     except Exception as e:
         ag_res = {
             "forecasts_agg": None,
             "cards": {"total_forecast": 0, "confidence_range": [0, 0], "series_count": 0},
             "drivers": [],
+            "analytics": {
+                "uptake_by_state": {"labels": [], "data": []},
+                "monthly_trend_multi": {"labels": [], "datasets": []},
+                "promotions_vs_apps": {"data": [], "r": None},
+                "demographics_pie": {"labels": [], "data": []}
+            },
+            "forecasts_agg_data": []
         }
         errors.append(f"aggregate_and_drivers exception: {e}")
 
     print("DEBUG cards:", ag_res.get("cards"))
 
-    # ---- STEP 5: UI Packager ----
+    # ---- STEP 5: UI Packager (returns payload directly) ----
     try:
         ui_res = ui_pack_and_persist(
             forecasts_agg_id=ag_res.get("forecasts_agg"),
+            forecasts_agg_data=ag_res.get("forecasts_agg_data"),
             cards=ag_res.get("cards"),
             drivers=ag_res.get("drivers"),
-            dq_report=(dq_res or {}).get("dq_report"),
-            errors=(errors or (sheets_res.get("warnings") if isinstance(sheets_res, dict) else None)),
-            persist="true",
-            params=params,
-            model_plan=(pf_res or {}).get("model_plan"),
+            analytics=ag_res.get("analytics"),
+            errorMsg="; ".join(errors) if errors else ""
         ) or {}
-        payload_for_ui = ui_res.get("response_json", {})
+        # IMPORTANT: return the dict directly (do NOT look for 'response_json')
+        payload_for_ui = ui_res
     except Exception as e:
         payload_for_ui = {
-            "summary_cards": {
-                "total_forecast": 0,
-                "confidence_range": [0, 0],
-                "series_count": 0,
-                "warnings": errors + [f"ui_pack_and_persist exception: {e}"],
+            "forecastResponse": {
+                "cards": {"total_forecast": 0, "confidence_range": [0, 0], "series_count": 0},
+                "drivers": [],
+                "generatedAt": None
             },
-            "chart": {"type": "line_with_band", "series": []},
-            "table": [],
-            "drivers": [],
-            "debug": {"errors": errors},
+            "forecastTable": [],
+            "analyticsData": {
+                "uptake_by_state": {"labels": [], "data": []},
+                "monthly_trend_multi": {"labels": [], "datasets": []},
+                "promotions_vs_apps": {"data": [], "r": None},
+                "demographics_pie": {"labels": [], "data": []}
+            },
+            "errorMsg": f"ui_pack_and_persist exception: {e}"
         }
 
     return payload_for_ui
