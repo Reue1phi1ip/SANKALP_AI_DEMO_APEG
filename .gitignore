@@ -1,0 +1,6 @@
+# env files anywhere
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example

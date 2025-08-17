@@ -1,140 +1,100 @@
 # Tools/UI_Packager_persist.py
-import json, time
+# Packs aggregator outputs into a UI-friendly payload for WeWeb.
+# NOTE: Uses camelCase key: analyticsData
 
-def ui_pack_and_persist(
-    forecasts_agg_id,
-    cards,
-    drivers,
-    dq_report=None,
-    errors=None,
-    persist="false",
-    params=None,
-    model_plan=None,
-    # NEW: in-memory fallback if no artifact store:
-    forecasts_agg_data=None,
-    *args,
-    **kwargs
-):
+from __future__ import annotations
+from typing import Any, Dict, List
+
+def ui_packager_persist(
+    forecasts_agg_id: str = None,
+    forecasts_agg_data: List[Dict[str, Any]] = None,  # fallback rows
+    cards: Dict[str, Any] = None,
+    drivers: List[str] = None,
+    analytics: Dict[str, Any] = None,
+    errorMsg: str = "",
+    *args, **kwargs
+) -> Dict[str, Any]:
     """
-    Returns:
-      {
-        "ui_payload": "json:ui_payload" | <id if storage available>,
-        "response_json": {
-           "summary_cards": {...},
-           "chart": {"type":"line_with_band","series":[...]},
-           "table": [...],
-           "drivers": [...],
-           "debug": {"dq_report": {...}, "errors": [...]}
-        },
-        "run_id": "M1-<epoch>"
-      }
+    Returns a payload the WeWeb page can bind directly:
+    {
+      "forecastResponse": { "cards": {...}, "drivers": [...] },
+      "forecastTable": [ {region, period, expected, low, high}, ... ],
+      "analyticsData": {   // <- camelCase
+         "uptake_by_state": {labels:[], data:[]},
+         "monthly_trend_multi": {labels:[], datasets:[]},
+         "promotions_vs_apps": {data:[], r: null},
+         "demographics_pie": {labels:[], data:[]}
+      },
+      "errorMsg": ""
+    }
     """
     import pandas as pd
+    from datetime import datetime
 
-    def _loads(x, fallback):
-        if isinstance(x, str):
-            try:
-                return json.loads(x)
-            except Exception:
-                return fallback
-        return x if x is not None else fallback
-
-    # accept both JSON strings and native objects
-    cards        = _loads(cards,     {"total_forecast": 0, "confidence_range": [0,0], "series_count": 0})
-    drivers      = _loads(drivers,   [])
-    dq_report    = _loads(dq_report, {})
-    errors       = _loads(errors,    [])
-    params       = _loads(params,    {})
-    model_plan   = _loads(model_plan, [])
-    agg_fallback = _loads(forecasts_agg_data, None)  # may be list[dict] or None
-
-    # try artifact store
-    def _load_df(tid):
-        try:
-            from waveflow.artifacts import load_artifact
-            return load_artifact(tid) if tid else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
-
-    agg = _load_df(forecasts_agg_id)
-
-    # if artifact empty, use in-memory fallback
-    if (agg is None or agg.empty) and isinstance(agg_fallback, list) and agg_fallback:
-        try:
-            agg = pd.DataFrame(agg_fallback)
-            print("[ui_pack_and_persist] using forecasts_agg_data fallback; rows:", len(agg))
-        except Exception as e:
-            print("[ui_pack_and_persist] forecasts_agg_data->DF failed:", e)
-            agg = pd.DataFrame()
-
-    # normalize columns we expect
-    if agg is None or agg.empty:
-        payload = {
-            "summary_cards": {**cards, "warnings": errors},
-            "chart": {"type": "line_with_band", "series": [{"period": "—", "low": 0, "expected": 0, "high": 0}]},
-            "table": [{"region": "—", "period": "—", "expected": 0, "low": 0, "high": 0}],
-            "drivers": drivers or ["Drivers unavailable"],
-            "debug": {"dq_report": dq_report, "errors": errors},
-        }
-    else:
-        # coerce numeric + strings
-        for c in ("expected", "low", "high"):
-            if c not in agg.columns:
-                agg[c] = 0.0
-            agg[c] = pd.to_numeric(agg[c], errors="coerce").fillna(0.0)
-        if "period" not in agg.columns:
-            agg["period"] = [f"P{i+1}" for i in range(len(agg))]
-        if "region" not in agg.columns:
-            agg["region"] = "—"
-
-        series = [
-            {
-                "period":   str(r.get("period", "—")),
-                "low":      float(r.get("low", 0)),
-                "expected": float(r.get("expected", 0)),
-                "high":     float(r.get("high", 0)),
-            }
-            for _, r in agg.iterrows()
-        ]
-
-        table_rows = [
-            {
-                "region":   str(r.get("region", "—")),
-                "period":   str(r.get("period", "—")),
-                "expected": float(r.get("expected", 0)),
-                "low":      float(r.get("low", 0)),
-                "high":     float(r.get("high", 0)),
-            }
-            for _, r in agg.iterrows()
-        ]
-
-        payload = {
-            "summary_cards": {**cards, "warnings": errors},
-            "chart": {"type": "line_with_band", "series": series},
-            "table": table_rows,
-            "drivers": drivers or ["Drivers unavailable"],
-            "debug": {"dq_report": dq_report, "errors": errors},
-        }
-
-    # try to persist UI payload if storage exists; otherwise return a symbolic id
+    # Try artifact store if available
     try:
-        from waveflow.storage import save_json
-        ui_id = save_json(payload, "ui_payload")
+        from waveflow.artifacts import load_artifact, save_artifact
     except Exception:
-        ui_id = "json:ui_payload"
+        load_artifact = save_artifact = None
 
-    run_id = f"M1-{int(time.time())}"
-    if str(persist).lower() == "true":
+    # ---------- Load forecasts_agg table ----------
+    agg_df = pd.DataFrame()
+    if load_artifact and forecasts_agg_id:
         try:
-            from waveflow.runs import persist_run
-            resp = persist_run(
-                artifacts={"forecasts_agg": forecasts_agg_id, "ui_payload": ui_id},
-                response_json=payload,
-                params=params,
-                model_plan=model_plan,
-            )
-            run_id = resp.get("run_id", run_id)
-        except Exception:
-            pass
+            agg_df = load_artifact(forecasts_agg_id)
+        except Exception as e:
+            print("[ui_packager_persist] load_artifact failed:", e)
 
-    return {"ui_payload": ui_id, "response_json": payload, "run_id": run_id}
+    if agg_df.empty and forecasts_agg_data:
+        try:
+            agg_df = pd.DataFrame(forecasts_agg_data)
+        except Exception as e:
+            print("[ui_packager_persist] forecasts_agg_data->DF failed:", e)
+
+    # Ensure required columns exist
+    for col in ("region", "period", "expected", "low", "high"):
+        if col not in agg_df.columns:
+            agg_df[col] = [] if col in ("region", "period") else 0.0
+
+    # ---------- Defaults for cards/drivers/analytics ----------
+    cards = cards or {"total_forecast": 0.0, "confidence_range": [0.0, 0.0], "series_count": 0}
+    drivers = drivers or ["Drivers unavailable"]
+
+    analytics = analytics or {}
+    analyticsData = {
+        "uptake_by_state": analytics.get("uptake_by_state") or {"labels": [], "data": []},
+        "monthly_trend_multi": analytics.get("monthly_trend_multi") or {"labels": [], "datasets": []},
+        "promotions_vs_apps": analytics.get("promotions_vs_apps") or {"data": [], "r": None},
+        "demographics_pie": analytics.get("demographics_pie") or {"labels": [], "data": []}
+    }
+
+    # ---------- Build UI payload ----------
+    forecastTable = agg_df[["region", "period", "expected", "low", "high"]].copy()
+
+    ui_payload = {
+        "forecastResponse": {
+            "cards": cards,
+            "drivers": drivers,
+            "generatedAt": datetime.utcnow().isoformat() + "Z"
+        },
+        "forecastTable": forecastTable.to_dict(orient="records"),
+        "analyticsData": analyticsData,   # <-- camelCase as requested
+        "errorMsg": str(errorMsg or "")
+    }
+
+    # Optional: persist a snapshot for debugging / API retrieval
+    ui_payload_id = ""
+    if load_artifact and 'save_artifact' in globals():
+        try:
+            import pandas as pd
+            # store compact tables; the dict itself may be too large for a single artifact
+            tbl = pd.json_normalize(ui_payload, sep=".")
+            ui_payload_id = save_artifact(tbl, "ui_payload_latest")
+        except Exception as e:
+            print("[ui_packager_persist] save_artifact failed:", e)
+
+    # Return UI payload (and id if present)
+    res = {**ui_payload}
+    if ui_payload_id:
+        res["ui_payload_id"] = ui_payload_id
+    return res

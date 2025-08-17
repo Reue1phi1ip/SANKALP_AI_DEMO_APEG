@@ -13,9 +13,16 @@ def aggregate_and_drivers(
       "forecasts_agg": "table:forecasts_agg",
       "cards": {"total_forecast":..., "confidence_range":[lo,hi], "series_count":...},
       "drivers": [ ... ],
-      "forecasts_agg_data": [ {region, period, expected, low, high}, ... ]   # <-- added for UI packager
+      "forecasts_agg_data": [ {region, period, expected, low, high}, ... ],
+      "analytics": {                               # <-- NEW (non-breaking)
+        "uptake_by_state": { "labels": [...], "data": [...] },
+        "monthly_trend_multi": { "labels": [...], "datasets": [ {label, data: [...]}, ... ] },
+        "promotions_vs_apps": { "data": [ {x, y, label} ], "r": 0.0 or null },
+        "demographics_pie": { "labels": [...], "data": [...] }
+      }
     }
     """
+    import math
     import pandas as pd
 
     # Try artifact store if available
@@ -24,7 +31,9 @@ def aggregate_and_drivers(
     except Exception:
         load_artifact = save_artifact = None
 
-    # --- Load forecasts (fc) ---
+    # -----------------------------
+    # Load forecasts (fc)
+    # -----------------------------
     fc = pd.DataFrame()
     if load_artifact and forecasts_raw_id:
         try:
@@ -39,7 +48,9 @@ def aggregate_and_drivers(
         except Exception as e:
             print("[aggregate] forecasts_raw_data->DF failed:", e)
 
-    # --- Load features (fx) for driver hints ---
+    # -----------------------------
+    # Load features (fx) for analytics/drivers
+    # -----------------------------
     fx = pd.DataFrame()
     if load_artifact and features_id:
         try:
@@ -53,7 +64,21 @@ def aggregate_and_drivers(
         except Exception as e:
             print("[aggregate] features_data->DF failed:", e)
 
-    # --- Ensure required columns exist in fc ---
+    # Normalize minimal schema for fx
+    if not fx.empty:
+        if "date" in fx.columns:
+            fx["date"] = pd.to_datetime(fx["date"], errors="coerce")
+        for c in ("apps_count", "promo_intensity", "applicant_age"):
+            if c in fx.columns:
+                fx[c] = pd.to_numeric(fx[c], errors="coerce")
+        for dim in ("scheme_id", "geo_code", "applicant_gender", "income_bracket", "occupation"):
+            if dim in fx.columns:
+                fx[dim] = fx[dim].astype(str).str.strip()
+        fx = fx.dropna(subset=["date"], how="any")
+
+    # -----------------------------
+    # Ensure required columns exist in fc
+    # -----------------------------
     for c in ("yhat", "yhat_low", "yhat_high"):
         if c not in fc.columns:
             fc[c] = 0.0
@@ -72,7 +97,9 @@ def aggregate_and_drivers(
     for c in ("yhat", "yhat_low", "yhat_high"):
         fc[c] = pd.to_numeric(fc[c], errors="coerce").fillna(0.0).astype(float)
 
-    # --- Aggregate + cards ---
+    # -----------------------------
+    # Aggregate + cards
+    # -----------------------------
     if fc.empty:
         agg = pd.DataFrame(columns=["region", "period", "expected", "low", "high"])
         cards = {
@@ -107,7 +134,9 @@ def aggregate_and_drivers(
             "series_count": series_count
         }
 
-    # --- Drivers (descriptive) ---
+    # -----------------------------
+    # Drivers (descriptive)
+    # -----------------------------
     drivers = []
     if not fx.empty and "promo_intensity" in fx.columns:
         try:
@@ -130,7 +159,138 @@ def aggregate_and_drivers(
     if not drivers:
         drivers = ["Drivers unavailable"]
 
-    # --- Persist aggregate if possible (optional) ---
+    # -----------------------------
+    # Analytics for charts (non-breaking extras)
+    # -----------------------------
+    def _to_month(dt) -> str:
+        return f"{dt.year}-{str(dt.month).zfill(2)}"
+
+    def _pearson(xs, ys):
+        xs = pd.Series(xs, dtype=float)
+        ys = pd.Series(ys, dtype=float)
+        xs = xs.replace([pd.NA, pd.NaT], 0).fillna(0.0)
+        ys = ys.replace([pd.NA, pd.NaT], 0).fillna(0.0)
+        n = len(xs)
+        if n == 0:
+            return None
+        xbar = xs.mean()
+        ybar = ys.mean()
+        num = ((xs - xbar) * (ys - ybar)).sum()
+        den = math.sqrt(((xs - xbar)**2).sum() * ((ys - ybar)**2).sum())
+        if den == 0:
+            return None
+        return round(float(num / den), 3)
+
+    analytics = {
+        "uptake_by_state": {"labels": [], "data": []},
+        "monthly_trend_multi": {"labels": [], "datasets": []},
+        "promotions_vs_apps": {"data": [], "r": None},
+        "demographics_pie": {"labels": [], "data": []}
+    }
+
+    if not fx.empty:
+        # --- Uptake by State ---
+        if "geo_code" in fx.columns and "apps_count" in fx.columns:
+            by_state = (
+                fx.groupby("geo_code", as_index=False)["apps_count"].sum()
+                  .sort_values("geo_code")
+            )
+            analytics["uptake_by_state"] = {
+                "labels": by_state["geo_code"].astype(str).tolist(),
+                "data": by_state["apps_count"].fillna(0).round(0).astype(int).tolist()
+            }
+
+        # --- Monthly Trend (multi-series per scheme) ---
+        if {"date","scheme_id","apps_count"}.issubset(fx.columns):
+            mdf = fx.copy()
+            mdf["month_key"] = mdf["date"].dt.to_period("M").astype(str)
+            # Complete label set (sorted)
+            labels = sorted(mdf["month_key"].dropna().unique().tolist())
+            datasets = []
+            for sid, g in mdf.groupby("scheme_id", dropna=False):
+                s = (
+                    g.groupby("month_key", as_index=False)["apps_count"].sum()
+                     .set_index("month_key").reindex(labels).fillna(0)
+                )
+                datasets.append({
+                    "label": str(sid),
+                    "data": s["apps_count"].round(0).astype(int).tolist()
+                })
+            analytics["monthly_trend_multi"] = {"labels": labels, "datasets": datasets}
+
+        # --- Promotions vs Applications (scatter + Pearson r) ---
+        if {"date","scheme_id","geo_code","apps_count"}.issubset(fx.columns) and ("promo_intensity" in fx.columns):
+            j = fx.copy()
+            j["month_key"] = j["date"].dt.to_period("M").astype(str)
+            # monthly sum per series for both metrics
+            apps_m = (
+                j.groupby(["scheme_id","geo_code","month_key"], as_index=False)["apps_count"].sum()
+            )
+            promo_m = (
+                j.groupby(["scheme_id","geo_code","month_key"], as_index=False)["promo_intensity"].sum()
+            )
+            merged = pd.merge(apps_m, promo_m, on=["scheme_id","geo_code","month_key"], how="inner")
+            scatter = [
+                {
+                    "x": float(row["promo_intensity"]),
+                    "y": float(row["apps_count"]),
+                    "label": f'{row["scheme_id"]} {row["geo_code"]} {row["month_key"]}'
+                }
+                for _, row in merged.iterrows()
+            ]
+            r = _pearson(merged["promo_intensity"], merged["apps_count"]) if len(merged) else None
+            analytics["promotions_vs_apps"] = {"data": scatter, "r": r}
+
+        # --- Demographics pie (auto-detect best available) ---
+        # Preference order: gender -> income -> occupation -> age buckets
+        if "applicant_gender" in fx.columns and fx["applicant_gender"].notna().any():
+            g = (fx.groupby("applicant_gender", as_index=False)["apps_count"].sum()
+                    .sort_values("apps_count", ascending=False))
+            analytics["demographics_pie"] = {
+                "labels": g["applicant_gender"].astype(str).tolist(),
+                "data": g["apps_count"].fillna(0).round(0).astype(int).tolist()
+            }
+        elif "income_bracket" in fx.columns and fx["income_bracket"].notna().any():
+            g = (fx.groupby("income_bracket", as_index=False)["apps_count"].sum()
+                    .sort_values("apps_count", ascending=False))
+            analytics["demographics_pie"] = {
+                "labels": g["income_bracket"].astype(str).tolist(),
+                "data": g["apps_count"].fillna(0).round(0).astype(int).tolist()
+            }
+        elif "occupation" in fx.columns and fx["occupation"].notna().any():
+            g = (fx.groupby("occupation", as_index=False)["apps_count"].sum()
+                    .sort_values("apps_count", ascending=False))
+            analytics["demographics_pie"] = {
+                "labels": g["occupation"].astype(str).tolist(),
+                "data": g["apps_count"].fillna(0).round(0).astype(int).tolist()
+            }
+        elif "applicant_age" in fx.columns and fx["applicant_age"].notna().any():
+            # Age buckets: <18, 18–25, 26–35, 36–50, 50+
+            def age_bucket(x):
+                try:
+                    a = float(x)
+                except Exception:
+                    return "Unknown"
+                if math.isnan(a):
+                    return "Unknown"
+                a = int(a)
+                if a < 18: return "<18"
+                if a <= 25: return "18–25"
+                if a <= 35: return "26–35"
+                if a <= 50: return "36–50"
+                return "50+"
+            tmp = fx.copy()
+            tmp["age_bucket"] = tmp["applicant_age"].apply(age_bucket)
+            g = (tmp.groupby("age_bucket", as_index=False)["apps_count"].sum()
+                    .sort_values("apps_count", ascending=False))
+            analytics["demographics_pie"] = {
+                "labels": g["age_bucket"].astype(str).tolist(),
+                "data": g["apps_count"].fillna(0).round(0).astype(int).tolist()
+            }
+
+    # -----------------------------
+    # Persist aggregate if possible (optional)
+    # -----------------------------
     agg_id = "table:forecasts_agg"
     if save_artifact:
         try:
@@ -142,5 +302,6 @@ def aggregate_and_drivers(
         "forecasts_agg": agg_id,
         "cards": cards,
         "drivers": drivers,
-        "forecasts_agg_data": agg.to_dict(orient="records")  # helps UI packager
+        "forecasts_agg_data": agg.to_dict(orient="records"),
+        "analytics": analytics
     }
