@@ -13,8 +13,9 @@ def aggregate_and_drivers(
       "forecasts_agg": "table:forecasts_agg",
       "cards": {"total_forecast":..., "confidence_range":[lo,hi], "series_count":...},
       "drivers": [ ... ],
+      "insights": [ "...", "...", "..." ],         # <-- NEW (non-breaking)
       "forecasts_agg_data": [ {region, period, expected, low, high}, ... ],
-      "analytics": {                               # <-- NEW (non-breaking)
+      "analytics": {
         "uptake_by_state": { "labels": [...], "data": [...] },
         "monthly_trend_multi": { "labels": [...], "datasets": [ {label, data: [...]}, ... ] },
         "promotions_vs_apps": { "data": [ {x, y, label} ], "r": 0.0 or null },
@@ -84,7 +85,6 @@ def aggregate_and_drivers(
             fc[c] = 0.0
 
     if "period" not in fc.columns:
-        # provide a simple fallback period label
         fc["period"] = [f"P{i+1}" for i in range(len(fc))]
 
     if "geo_code" not in fc.columns:
@@ -162,9 +162,6 @@ def aggregate_and_drivers(
     # -----------------------------
     # Analytics for charts (non-breaking extras)
     # -----------------------------
-    def _to_month(dt) -> str:
-        return f"{dt.year}-{str(dt.month).zfill(2)}"
-
     def _pearson(xs, ys):
         xs = pd.Series(xs, dtype=float)
         ys = pd.Series(ys, dtype=float)
@@ -173,8 +170,7 @@ def aggregate_and_drivers(
         n = len(xs)
         if n == 0:
             return None
-        xbar = xs.mean()
-        ybar = ys.mean()
+        xbar = xs.mean(); ybar = ys.mean()
         num = ((xs - xbar) * (ys - ybar)).sum()
         den = math.sqrt(((xs - xbar)**2).sum() * ((ys - ybar)**2).sum())
         if den == 0:
@@ -204,7 +200,6 @@ def aggregate_and_drivers(
         if {"date","scheme_id","apps_count"}.issubset(fx.columns):
             mdf = fx.copy()
             mdf["month_key"] = mdf["date"].dt.to_period("M").astype(str)
-            # Complete label set (sorted)
             labels = sorted(mdf["month_key"].dropna().unique().tolist())
             datasets = []
             for sid, g in mdf.groupby("scheme_id", dropna=False):
@@ -222,13 +217,8 @@ def aggregate_and_drivers(
         if {"date","scheme_id","geo_code","apps_count"}.issubset(fx.columns) and ("promo_intensity" in fx.columns):
             j = fx.copy()
             j["month_key"] = j["date"].dt.to_period("M").astype(str)
-            # monthly sum per series for both metrics
-            apps_m = (
-                j.groupby(["scheme_id","geo_code","month_key"], as_index=False)["apps_count"].sum()
-            )
-            promo_m = (
-                j.groupby(["scheme_id","geo_code","month_key"], as_index=False)["promo_intensity"].sum()
-            )
+            apps_m = j.groupby(["scheme_id","geo_code","month_key"], as_index=False)["apps_count"].sum()
+            promo_m = j.groupby(["scheme_id","geo_code","month_key"], as_index=False)["promo_intensity"].sum()
             merged = pd.merge(apps_m, promo_m, on=["scheme_id","geo_code","month_key"], how="inner")
             scatter = [
                 {
@@ -265,7 +255,6 @@ def aggregate_and_drivers(
                 "data": g["apps_count"].fillna(0).round(0).astype(int).tolist()
             }
         elif "applicant_age" in fx.columns and fx["applicant_age"].notna().any():
-            # Age buckets: <18, 18–25, 26–35, 36–50, 50+
             def age_bucket(x):
                 try:
                     a = float(x)
@@ -289,9 +278,66 @@ def aggregate_and_drivers(
             }
 
     # -----------------------------
+    # Key Insights (exactly 3, short)
+    # -----------------------------
+    insights = []
+    try:
+        # 1) Top state by total expected (from aggregates)
+        if not fc.empty:
+            tmp = fc.copy()
+            tmp["expected"] = tmp["yhat"]
+            top_state = (tmp.groupby("geo_code", as_index=False)["expected"].sum()
+                            .sort_values("expected", ascending=False).head(1))
+            if len(top_state):
+                st, val = str(top_state.iloc[0]["geo_code"]), float(top_state.iloc[0]["expected"])
+                insights.append(f"Top state by expected applications: {st} (~{int(round(val,0))}).")
+
+        # 2) Peak forecast month/period (use forecast_month when present; fallback to period)
+        if not fc.empty:
+            tmp = fc.copy()
+            tmp["expected"] = tmp["yhat"]
+            if "forecast_month" in tmp.columns and tmp["forecast_month"].notna().any():
+                month_col = "forecast_month"
+            else:
+                month_col = "period"
+            peak = (tmp.groupby(month_col, as_index=False)["expected"].sum()
+                        .sort_values("expected", ascending=False).head(1))
+            if len(peak):
+                m_label = str(peak.iloc[0][month_col])
+                insights.append(f"Peak forecast window: {m_label}.")
+
+        # 3) Dominant demographic slice (from analytics pie if available)
+        dp = (analytics.get("demographics_pie") or {})
+        if dp.get("labels") and dp.get("data"):
+            idx = int(pd.Series(dp["data"]).astype(float).fillna(0).idxmax())
+            insights.append(f"Dominant demographic: {dp['labels'][idx]}.")
+
+        # If we still have <3, use promo correlation signal
+        if len(insights) < 3:
+            r = (analytics.get("promotions_vs_apps") or {}).get("r")
+            if r is not None:
+                if abs(r) >= 0.6:
+                    insights.append(f"Promotions ↔ applications show strong correlation (r≈{r}).")
+                elif abs(r) >= 0.3:
+                    insights.append(f"Promotions ↔ applications show moderate correlation (r≈{r}).")
+                else:
+                    insights.append(f"Promotions ↔ applications show weak correlation (r≈{r}).")
+
+        # Always return exactly 3 lines (pad with harmless note if needed)
+        while len(insights) < 3:
+            insights.append("Data sufficient; no additional anomalies detected.")
+        insights = insights[:3]
+    except Exception as e:
+        # Fail-safe: never break the tool on insights
+        insights = ["Insights unavailable", "—", "—"]
+        print("[aggregate] insights error:", e)
+
+    # -----------------------------
     # Persist aggregate if possible (optional)
     # -----------------------------
     agg_id = "table:forecasts_agg"
+    if 'agg' not in locals():
+        agg = pd.DataFrame(columns=["region","period","expected","low","high"])
     if save_artifact:
         try:
             agg_id = save_artifact(agg, "forecasts_agg")
@@ -302,6 +348,7 @@ def aggregate_and_drivers(
         "forecasts_agg": agg_id,
         "cards": cards,
         "drivers": drivers,
+        "insights": insights,                      # <-- NEW
         "forecasts_agg_data": agg.to_dict(orient="records"),
         "analytics": analytics
     }

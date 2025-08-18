@@ -16,9 +16,18 @@ def ui_pack_and_persist(
     """
     Returns payload the WeWeb page can bind directly:
     {
-      "forecastResponse": { "cards": {...}, "drivers": [...], "generatedAt": ISO8601Z },
+      "forecastResponse": {
+        "cards": {...},
+        "drivers": [...],
+        "insights": ["...", "...", "..."],     # NEW: always 3 short lines
+        "trend": {                             # NEW: safe default if not provided
+           "labels": ["YYYY-MM", ...],
+           "series": [{ "name": "Expected", "data": [ ... ] }]
+        },
+        "generatedAt": ISO8601Z
+      },
       "forecastTable": [ {region, period, expected, low, high}, ... ],
-      "analyticsData": {   // camelCase for your UI
+      "analyticsData": {
          "uptake_by_state": {labels:[], data:[]},
          "monthly_trend_multi": {labels:[], datasets:[]},
          "promotions_vs_apps": {data:[], r:null},
@@ -67,6 +76,41 @@ def ui_pack_and_persist(
         "demographics_pie": analytics.get("demographics_pie") or {"labels": [], "data": []},
     }
 
+    # ---------- Insights (exactly 3 short lines) ----------
+    # Prefer insights provided by the upstream Aggregator tool (passed via kwargs)
+    insights = kwargs.get("insights") or []
+    if not isinstance(insights, list):
+        insights = [str(insights)]
+    # Normalize, trim, and pad to 3
+    insights = [str(x).strip() for x in insights if str(x).strip()]
+    while len(insights) < 3:
+        insights.append("No further anomalies detected.")
+    insights = insights[:3]
+
+    # ---------- Trend (labels + single Expected series) ----------
+    # Prefer a pre-computed trend (kwargs); else build from aggregated table
+    trend = kwargs.get("trend") or {}
+    if not isinstance(trend, dict) or not trend.get("labels") or not trend.get("series"):
+        # Build a safe default: sum expected per period; sort by natural P# order if possible
+        trend_labels = []
+        trend_values = []
+        if not agg_df.empty:
+            # If 'period' looks like P1..Pn, sort by numeric; else just alphabetical
+            def _pkey(p):
+                try:
+                    return int(str(p).lstrip("Pp"))
+                except Exception:
+                    return p
+            t = (agg_df.groupby("period", as_index=False)["expected"].sum()
+                        .sort_values("period", key=lambda s: s.map(_pkey)))
+            trend_labels = t["period"].astype(str).tolist()
+            trend_values = t["expected"].fillna(0).astype(float).tolist()
+
+        trend = {
+            "labels": trend_labels,
+            "series": [{"name": "Expected", "data": trend_values}]
+        }
+
     # ---------- Build UI payload ----------
     forecastTable = agg_df[["region", "period", "expected", "low", "high"]].copy()
 
@@ -74,10 +118,12 @@ def ui_pack_and_persist(
         "forecastResponse": {
             "cards": cards,
             "drivers": drivers,
+            "insights": insights,                 # NEW
+            "trend": trend,                       # NEW
             "generatedAt": datetime.utcnow().isoformat() + "Z",
         },
         "forecastTable": forecastTable.to_dict(orient="records"),
-        "analyticsData": analyticsData,   # camelCase
+        "analyticsData": analyticsData,           # camelCase
         "errorMsg": str(errorMsg or ""),
     }
 

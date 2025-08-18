@@ -23,6 +23,30 @@ def _snake(s: str) -> str:
     return s
 
 
+def _map_scheme_val(v: Any) -> Any:
+    """Normalize 'Scheme 1/2/3' and 's1/s2/s3' to canonical S1/S2/S3."""
+    if v is None:
+        return v
+    x = str(v).strip().lower()
+    if re.search(r"\bscheme\s*1\b|\bs1\b", x):
+        return "S1"
+    if re.search(r"\bscheme\s*2\b|\bs2\b", x):
+        return "S2"
+    if re.search(r"\bscheme\s*3\b|\bs3\b", x):
+        return "S3"
+    # keep uppercase for already clean ids like S1/S2/S3
+    return str(v).strip().upper()
+
+
+def _infer_geo_level(geo_code: str, existing: str | None) -> str | None:
+    """If geo_level is missing, infer 'state' when a non-empty code is present; else 'national'."""
+    if existing not in (None, ""):
+        return str(existing).strip()
+    if geo_code and str(geo_code).strip():
+        return "state"
+    return "national"
+
+
 def _normalize_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Lower/underscore headers, apply aliases, and coerce basic types."""
     if not records:
@@ -34,22 +58,32 @@ def _normalize_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     # Canonical schema aliases expected by downstream analytics
     ALIASES = {
+        # geo
         "state": "geo_code",
         "state_code": "geo_code",
         "region": "geo_code",
         "region_code": "geo_code",
 
+        # counts / applications
         "applications": "apps_count",
         "application_count": "apps_count",
         "apps": "apps_count",
         "count": "apps_count",
 
+        # promotions
         "promotion_intensity": "promo_intensity",
         "promo": "promo_intensity",
 
+        # demographics
         "gender": "applicant_gender",
         "age": "applicant_age",
         "income": "income_bracket",
+
+        # scheme + period variants
+        "scheme": "scheme_id",
+        "scheme_name": "scheme_id",
+        "month": "date",
+        "period": "date",
     }
 
     header_map = {}
@@ -77,7 +111,8 @@ def _normalize_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             except Exception:
                 r["date"] = None
 
-        for num_col in ("apps_count", "promo_intensity", "applicant_age"):
+        # numeric coercions used across modules
+        for num_col in ("apps_count", "promo_intensity", "applicant_age", "expected", "low", "high"):
             if num_col in r and r[num_col] not in (None, ""):
                 try:
                     r[num_col] = float(str(r[num_col]).replace(",", ""))
@@ -85,9 +120,16 @@ def _normalize_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     r[num_col] = None
 
         # Trim string dims (avoid duplicate buckets due to whitespace)
-        for dim in ("scheme_id", "geo_code", "applicant_gender", "income_bracket", "occupation"):
+        for dim in ("scheme_id", "geo_code", "applicant_gender", "income_bracket", "occupation", "geo_level"):
             if dim in r and r[dim] is not None:
                 r[dim] = str(r[dim]).strip()
+
+        # Normalize scheme ids so downstream filters work uniformly
+        if "scheme_id" in r:
+            r["scheme_id"] = _map_scheme_val(r["scheme_id"])
+
+        # Backfill geo_level if missing
+        r["geo_level"] = _infer_geo_level(r.get("geo_code", ""), r.get("geo_level"))
 
     return out
 

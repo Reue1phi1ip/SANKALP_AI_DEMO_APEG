@@ -5,12 +5,18 @@
 #  - Horizon mapped to months (quarter=3, 6 months=6, year=12)
 #  - Seasonal-naive / 3-mo moving average / last-value fallback
 #  - Adds 'forecast_month' (YYYY-MM) while preserving 'period' (P1..Ph)
+#  - Optional filters via kwargs: schemes, region_level, region_value
 
 import json
 
 def plan_and_forecast(features_id=None, timeframe=None, features_data=None, *args, **kwargs):
     """
     timeframe: next_quarter | next_6_months | next_year  (defaults to next_quarter)
+    Optional kwargs (non-breaking):
+      - schemes: list[str] like ["S1","S2"]
+      - region_level: "national" | "state"
+      - region_value: state code/name when region_level=="state"
+
     Returns:
       {
         "model_plan": [...],
@@ -19,8 +25,6 @@ def plan_and_forecast(features_id=None, timeframe=None, features_data=None, *arg
       }
     """
     import pandas as pd
-    from datetime import datetime
-    from dateutil.relativedelta import relativedelta
 
     # Try artifact store if present (Waveflow)
     try:
@@ -68,7 +72,6 @@ def plan_and_forecast(features_id=None, timeframe=None, features_data=None, *arg
         }
 
     # ---- Normalize minimal schema/types ----
-    # (tolerant if columns already clean)
     if "date" in feats.columns:
         feats["date"] = pd.to_datetime(feats["date"], errors="coerce")
     if "apps_count" in feats.columns:
@@ -80,6 +83,16 @@ def plan_and_forecast(features_id=None, timeframe=None, features_data=None, *arg
     feats = feats.dropna(subset=["date"])
     feats["scheme_id"] = feats["scheme_id"].astype(str)
     feats["geo_code"]  = feats["geo_code"].astype(str)
+
+    # ---- Optional filters (only if kwargs provided) ----
+    schemes = kwargs.get("schemes") or []
+    region_level = (kwargs.get("region_level") or "").strip().lower()
+    region_value = (kwargs.get("region_value") or "").strip()
+
+    if schemes and isinstance(schemes, (list, tuple)):
+        feats = feats[feats["scheme_id"].isin([str(s).upper() for s in schemes])]
+    if region_level == "state" and region_value:
+        feats = feats[feats["geo_code"].str.strip().str.lower() == region_value.strip().lower()]
 
     # ---- Build model plan based on history length ----
     plan = []
@@ -106,20 +119,15 @@ def plan_and_forecast(features_id=None, timeframe=None, features_data=None, *arg
 
         plan.append({"series_id": f"{sid}|{geo}", "model": model_name, "history_points": hp})
 
-        # determine start month for forecasting (month after last history)
-        if hp == 0:
-            # just pad zeros
-            last_month = pd.Timestamp.today().to_period("M").to_timestamp()
-        else:
-            last_month = g_m.index.max()
+        # determine start month for forecasting (month after last history idx)
+        last_month = g_m.index.max() if hp > 0 else pd.Timestamp.today().to_period("M").to_timestamp()
 
-        # generate forecasts
+        # baseline values
         base_vals = g_m["y"].values.tolist()
 
-        # helpers for seasonal and MA
+        # helpers
         def seasonal_forecast(step_idx: int) -> float:
-            # same month last year if exists else fallback to MA
-            target = (last_month + pd.offsets.MonthBegin(step_idx+1))
+            target = last_month + pd.offsets.MonthBegin(step_idx + 1)
             ly = target - pd.DateOffset(years=1)
             if ly in g_m.index:
                 return float(g_m.loc[ly, "y"])
@@ -134,8 +142,7 @@ def plan_and_forecast(features_id=None, timeframe=None, features_data=None, *arg
             return float(base_vals[-1]) if base_vals else 0.0
 
         for i in range(horizon):
-            # compute month label
-            f_month_dt = last_month + pd.offsets.MonthBegin(i+1)
+            f_month_dt = last_month + pd.offsets.MonthBegin(i + 1)
             if model_name == "SeasonalNaive":
                 yhat = seasonal_forecast(i)
             elif model_name == "MovingAverage-3":
