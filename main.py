@@ -97,7 +97,7 @@ ui_pack_and_persist = _import_first((
 # ----------------------------
 # FastAPI & CORS
 # ----------------------------
-app = FastAPI(title="SANKALP Backend", version="1.0.0")
+app = FastAPI(title="SANKALP Backend", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS or ["*"],
@@ -173,7 +173,20 @@ async def run_endpoint(
         except Exception as e:
             print("DEBUG fallback_json_parse_error:", e)
 
-    params = (inp.get("params") or {}) if isinstance(inp.get("params"), dict) else inp
+    # params: support both {input:{params:{...}}} and {input:{...}}
+    params = (inp.get("params") or {}) if isinstance(inp.get("params"), dict) else (inp or {})
+    # Extract filter params (non-breaking defaults)
+    timeframe = str((params.get("timeframe") or "next_quarter")).lower()
+    schemes = params.get("schemes") or []
+    region_level = (params.get("region_level") or "national").strip().lower()
+    region_value = (params.get("region_value") or "").strip()
+    demographic = params.get("demographic") or None  # currently not used in model; reserved
+
+    print("DEBUG params:", {
+        "timeframe": timeframe, "schemes": schemes,
+        "region_level": region_level, "region_value": region_value,
+        "demographic": demographic
+    })
 
     # ---- STEP 1: Google Sheets -> staged artifacts (env fallbacks) ----
     sheet_id   = (g.get("sheet_id") or os.getenv("SHEET_ID") or "").strip() or None
@@ -228,13 +241,16 @@ async def run_endpoint(
     features_data = dq_res.get("features_data")
     print("DEBUG features_id:", features_id)
 
-    # ---- STEP 3: Planning + Forecasts ----
-    timeframe = str((params.get("timeframe") or "next_quarter")).lower()
+    # ---- STEP 3: Planning + Forecasts (now respects filters) ----
     try:
         pf_res = plan_and_forecast(
             features_id=features_id,
             timeframe=timeframe,
-            features_data=features_data
+            features_data=features_data,
+            # new kwargs supported by tool (safe if ignored)
+            schemes=schemes,
+            region_level=region_level,
+            region_value=region_value
         ) or {}
     except Exception as e:
         pf_res = {"forecasts_raw": None, "model_plan": [], "forecasts_raw_data": []}
@@ -263,13 +279,14 @@ async def run_endpoint(
                 "promotions_vs_apps": {"data": [], "r": None},
                 "demographics_pie": {"labels": [], "data": []}
             },
-            "forecasts_agg_data": []
+            "forecasts_agg_data": [],
+            "insights": ["Insights unavailable", "—", "—"]
         }
         errors.append(f"aggregate_and_drivers exception: {e}")
 
     print("DEBUG cards:", ag_res.get("cards"))
 
-    # ---- STEP 5: UI Packager (returns payload directly) ----
+    # ---- STEP 5: UI Packager (now forwards insights; trend auto-builds if absent) ----
     try:
         ui_res = ui_pack_and_persist(
             forecasts_agg_id=ag_res.get("forecasts_agg"),
@@ -277,15 +294,17 @@ async def run_endpoint(
             cards=ag_res.get("cards"),
             drivers=ag_res.get("drivers"),
             analytics=ag_res.get("analytics"),
+            insights=ag_res.get("insights"),    # <-- forward 3-line insights
+            # trend=ag_res.get("trend"),        # not required; UI tool builds default from table
             errorMsg="; ".join(errors) if errors else ""
         ) or {}
-        # IMPORTANT: return the dict directly (do NOT look for 'response_json')
         payload_for_ui = ui_res
     except Exception as e:
         payload_for_ui = {
             "forecastResponse": {
                 "cards": {"total_forecast": 0, "confidence_range": [0, 0], "series_count": 0},
                 "drivers": [],
+                "insights": ["Insights unavailable", "—", "—"],
                 "generatedAt": None
             },
             "forecastTable": [],
